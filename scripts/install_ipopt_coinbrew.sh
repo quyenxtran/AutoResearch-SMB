@@ -15,6 +15,7 @@ set -euo pipefail
 #   COIN_OR_ROOT=/path/to/sources
 #   COINBREW_TEST=0
 #   IPOPT_LAPACK_LFLAGS="-L/path/to/lib -lopenblas"
+#   IPOPT_BLAS_LFLAGS="-L/path/to/lib -lopenblas"
 #   COINBREW_EXTRA_ARGS="--parallel-jobs 8"
 
 if [[ -z "${SCRATCH:-}" ]]; then
@@ -28,6 +29,7 @@ COIN_OR_ROOT="${COIN_OR_ROOT:-$SCRATCH/src/coin-or}"
 COINBREW="${COIN_OR_ROOT}/coinbrew"
 COINBREW_TEST="${COINBREW_TEST:-1}"
 IPOPT_LAPACK_LFLAGS="${IPOPT_LAPACK_LFLAGS:-}"
+IPOPT_BLAS_LFLAGS="${IPOPT_BLAS_LFLAGS:-}"
 COINBREW_EXTRA_ARGS="${COINBREW_EXTRA_ARGS:-}"
 
 required_cmds=(bash git make pkg-config gcc g++ gfortran)
@@ -62,6 +64,9 @@ if [[ -n "${OPENBLAS_ROOT:-}" ]]; then
   if [[ -z "${IPOPT_LAPACK_LFLAGS}" ]]; then
     IPOPT_LAPACK_LFLAGS="-L${OPENBLAS_ROOT}/lib -lopenblas"
   fi
+  if [[ -z "${IPOPT_BLAS_LFLAGS}" ]]; then
+    IPOPT_BLAS_LFLAGS="${IPOPT_LAPACK_LFLAGS}"
+  fi
 fi
 
 if [[ ! -x "${COINBREW}" ]]; then
@@ -75,6 +80,9 @@ echo "Install prefix: ${IPOPT_PREFIX}"
 echo "coinbrew: ${COINBREW}"
 if [[ -n "${IPOPT_LAPACK_LFLAGS}" ]]; then
   echo "Lapack/BLAS linker flags: ${IPOPT_LAPACK_LFLAGS}"
+fi
+if [[ -n "${IPOPT_BLAS_LFLAGS}" ]]; then
+  echo "BLAS linker flags: ${IPOPT_BLAS_LFLAGS}"
 fi
 if [[ -n "${PKG_CONFIG_PATH:-}" ]]; then
   echo "PKG_CONFIG_PATH: ${PKG_CONFIG_PATH}"
@@ -91,6 +99,9 @@ build_args=(
 
 if [[ -n "${IPOPT_LAPACK_LFLAGS}" ]]; then
   build_args+=("--with-lapack-lflags=${IPOPT_LAPACK_LFLAGS}")
+fi
+if [[ -n "${IPOPT_BLAS_LFLAGS}" ]]; then
+  build_args+=("--with-blas-lflags=${IPOPT_BLAS_LFLAGS}")
 fi
 
 if [[ -n "${COINBREW_EXTRA_ARGS}" ]]; then
@@ -117,6 +128,7 @@ if [[ ! -x "${IPOPT_PREFIX}/bin/ipopt" ]]; then
   echo "Check the coinbrew build output above for BLAS/LAPACK, MUMPS, or ASL issues."
   echo "If LAPACK was not found, rerun with something like:"
   echo "  export IPOPT_LAPACK_LFLAGS='-L/path/to/lib -lopenblas'"
+  echo "  export IPOPT_BLAS_LFLAGS='-L/path/to/lib -lopenblas'"
   echo "  bash scripts/install_ipopt_coinbrew.sh"
   exit 1
 fi
