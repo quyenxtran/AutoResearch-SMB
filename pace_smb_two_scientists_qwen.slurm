@@ -5,7 +5,7 @@
 # sbatch AutoResearch-SMB/pace_smb_two_scientists_qwen.slurm
 # sbatch --export=ALL,START_LOCAL_LLM=1 AutoResearch-SMB/pace_smb_two_scientists_qwen.slurm
 # sbatch --export=ALL,START_LOCAL_LLM=1,RUN_BASELINE_NOTEBOOK=1 AutoResearch-SMB/pace_smb_two_scientists_qwen.slurm
-# sbatch --export=ALL,START_LOCAL_LLM=1,AGENT_ENTRYPOINT="python -m your_package.your_runner" AutoResearch-SMB/pace_smb_two_scientists_qwen.slurm
+# sbatch --export=ALL,START_LOCAL_LLM=1,AGENT_ENTRYPOINT="python -m benchmarks.agent_runner" AutoResearch-SMB/pace_smb_two_scientists_qwen.slurm
 #
 # This file is based on the existing PACE sample Slurm file, but it is narrowed to the
 # SembaSMB optimization workflow and exports an explicit compute budget so the two
