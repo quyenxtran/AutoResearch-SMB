@@ -19,7 +19,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
-#SBATCH --mem=96G
+#SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --mail-user=qtran47@gatech.edu
 #SBATCH --mail-type=END,FAIL
@@ -125,7 +125,7 @@ fi
 if [[ -n "${SLURM_MEM_PER_NODE:-}" && "${SLURM_MEM_PER_NODE}" != "0" ]]; then
   SMB_MEMORY_GB_COMPUTED="$(( (SLURM_MEM_PER_NODE + 1023) / 1024 ))"
 else
-  SMB_MEMORY_GB_COMPUTED="96"
+  SMB_MEMORY_GB_COMPUTED="32"
 fi
 
 if [[ -n "${SLURM_GPUS_ON_NODE:-}" ]]; then

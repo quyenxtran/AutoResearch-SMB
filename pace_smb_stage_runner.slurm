@@ -16,7 +16,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
-#SBATCH --mem=96G
+#SBATCH --mem=32G
 #SBATCH --time=08:00:00
 #SBATCH --mail-user=qtran47@gatech.edu
 #SBATCH --mail-type=END,FAIL
