@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+
+# Generated outputs
+reports/
+*.png
+
+# Local editor and OS files
+.DS_Store
+Thumbs.db

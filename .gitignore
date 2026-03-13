@@ -1,0 +1,16 @@
+.venv/
+**/.venv/
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*.pyo
+.ipynb_checkpoints/
+
+artifacts/
+logs/
+reports/
+*.png
+_sembasmb_git_backup/
+
+.DS_Store
+Thumbs.db
