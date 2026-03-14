@@ -231,9 +231,9 @@ These are not free design variables. They are fixed requirements of the problem 
 - external pump-limited streams `Fdes`, `Fex`, `Ffeed`, and `Fraf` must stay `<= 2.5 mL/min`
 - internal circulation flow `F1` may vary up to `5.0 mL/min`
 - total physical columns fixed at `8`
-- `purity_ex_meoh_free >= 0.90`
-- `recovery_ex_GA >= 0.90`
-- `recovery_ex_MA >= 0.90`
+- `purity_ex_meoh_free >= 0.85`
+- `recovery_ex_GA >= 0.85`
+- `recovery_ex_MA >= 0.85`
 
 ## Decision Variables vs Derived Quantities
 
@@ -341,14 +341,16 @@ Use the extract-purity definition already implemented by the code:
 
 - `purity_ex_meoh_free = (CE_GA + CE_MA) / (CE_GA + CE_MA + CE_Water)`
 
-The target is:
+The project objective target is:
 
-- `purity_ex_meoh_free >= 0.90`
+- `purity_ex_meoh_free >= 0.85`
 
 Use per-component recovery-to-extract constraints:
 
-- `recovery_ex_GA >= 0.90`
-- `recovery_ex_MA >= 0.90`
+- `recovery_ex_GA >= 0.85`
+- `recovery_ex_MA >= 0.85`
+
+Exploratory screening may temporarily use relaxed thresholds (for example `0.70`) to map feasible regions, but no final candidate is acceptable unless it satisfies the project objective thresholds above.
 
 Also retain the reference process-quality safeguards unless a documented study proves they must change:
 

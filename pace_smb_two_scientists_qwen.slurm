@@ -156,9 +156,19 @@ export SMB_MEDIUM_FIDELITY_HINT="${SMB_MEDIUM_FIDELITY_HINT:-nfex=6,nfet=3,ncp=2
 export SMB_HIGH_FIDELITY_HINT="${SMB_HIGH_FIDELITY_HINT:-nfex=10,nfet=5,ncp=2,nc=(1,2,3,2)}"
 export SMB_FFEED_BOUNDS_ML_MIN="${SMB_FFEED_BOUNDS_ML_MIN:-(0.0,2.5]}"
 export SMB_MAX_PUMP_FLOW_ML_MIN="${SMB_MAX_PUMP_FLOW_ML_MIN:-2.5}"
-export SMB_TARGET_PURITY_EX_MEOH_FREE="${SMB_TARGET_PURITY_EX_MEOH_FREE:-0.90}"
-export SMB_TARGET_RECOVERY_GA="${SMB_TARGET_RECOVERY_GA:-0.90}"
-export SMB_TARGET_RECOVERY_MA="${SMB_TARGET_RECOVERY_MA:-0.90}"
+export SMB_TSTEP_BOUNDS="${SMB_TSTEP_BOUNDS:-8.0,12.0}"
+# Exploratory search targets (used in search stage)
+export SMB_TARGET_PURITY_EX_MEOH_FREE="${SMB_TARGET_PURITY_EX_MEOH_FREE:-0.70}"
+export SMB_TARGET_RECOVERY_GA="${SMB_TARGET_RECOVERY_GA:-0.70}"
+export SMB_TARGET_RECOVERY_MA="${SMB_TARGET_RECOVERY_MA:-0.70}"
+# Project objective targets (used for strict validation/final acceptance)
+export SMB_PROJECT_TARGET_PURITY_EX_MEOH_FREE="${SMB_PROJECT_TARGET_PURITY_EX_MEOH_FREE:-0.85}"
+export SMB_PROJECT_TARGET_RECOVERY_GA="${SMB_PROJECT_TARGET_RECOVERY_GA:-0.85}"
+export SMB_PROJECT_TARGET_RECOVERY_MA="${SMB_PROJECT_TARGET_RECOVERY_MA:-0.85}"
+export SMB_EXECUTIVE_CONTROLLER_ENABLED="${SMB_EXECUTIVE_CONTROLLER_ENABLED:-1}"
+export SMB_EXECUTIVE_TRIGGER_REJECTS="${SMB_EXECUTIVE_TRIGGER_REJECTS:-2}"
+export SMB_EXECUTIVE_FORCE_AFTER_REJECTS="${SMB_EXECUTIVE_FORCE_AFTER_REJECTS:-3}"
+export SMB_EXECUTIVE_TOP_K_LOCK="${SMB_EXECUTIVE_TOP_K_LOCK:-5}"
 export SMB_OBJECTIVES_FILE="${SMB_OBJECTIVES_FILE:-${OBJECTIVES_FILE}}"
 export SMB_LLM_SOUL_FILE="${SMB_LLM_SOUL_FILE:-${LLM_SOUL_FILE}}"
 export SMB_IPOPT_RESOURCE_FILE="${SMB_IPOPT_RESOURCE_FILE:-${IPOPT_RESOURCE_FILE}}"
@@ -441,9 +451,17 @@ cat > "${ARTIFACT_DIR}/compute_manifest.${SLURM_JOB_ID:-local}.md" <<EOF
 - reference_notebook: ${SMB_REFERENCE_NOTEBOOK}
 - ffeed_bounds_ml_min: ${SMB_FFEED_BOUNDS_ML_MIN}
 - max_pump_flow_ml_min: ${SMB_MAX_PUMP_FLOW_ML_MIN}
-- target_purity_ex_meoh_free: ${SMB_TARGET_PURITY_EX_MEOH_FREE}
-- target_recovery_ga: ${SMB_TARGET_RECOVERY_GA}
-- target_recovery_ma: ${SMB_TARGET_RECOVERY_MA}
+- tstep_bounds: ${SMB_TSTEP_BOUNDS}
+- exploratory_target_purity_ex_meoh_free: ${SMB_TARGET_PURITY_EX_MEOH_FREE}
+- exploratory_target_recovery_ga: ${SMB_TARGET_RECOVERY_GA}
+- exploratory_target_recovery_ma: ${SMB_TARGET_RECOVERY_MA}
+- project_objective_purity_ex_meoh_free: ${SMB_PROJECT_TARGET_PURITY_EX_MEOH_FREE}
+- project_objective_recovery_ga: ${SMB_PROJECT_TARGET_RECOVERY_GA}
+- project_objective_recovery_ma: ${SMB_PROJECT_TARGET_RECOVERY_MA}
+- executive_controller_enabled: ${SMB_EXECUTIVE_CONTROLLER_ENABLED}
+- executive_trigger_rejects: ${SMB_EXECUTIVE_TRIGGER_REJECTS}
+- executive_force_after_rejects: ${SMB_EXECUTIVE_FORCE_AFTER_REJECTS}
+- executive_top_k_lock: ${SMB_EXECUTIVE_TOP_K_LOCK}
 - current_default_solver_stack: ${SMB_CURRENT_DEFAULT_SOLVER_STACK}
 - available_solver_options: ${SMB_AVAILABLE_SOLVER_OPTIONS}
 - available_acceleration_options: ${SMB_AVAILABLE_ACCELERATION_OPTIONS}

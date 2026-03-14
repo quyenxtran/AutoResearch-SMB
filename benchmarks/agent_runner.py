@@ -37,8 +37,58 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--benchmark-hours", type=float, default=float(os.environ.get("SMB_BENCHMARK_HOURS", "5.0")))
     parser.add_argument("--search-hours", type=float, default=float(os.environ.get("SMB_SEARCH_BUDGET_HOURS", "4.0")))
     parser.add_argument("--validation-hours", type=float, default=float(os.environ.get("SMB_VALIDATION_BUDGET_HOURS", "1.0")))
+    parser.add_argument(
+        "--project-purity-min",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SMB_PROJECT_TARGET_PURITY_EX_MEOH_FREE",
+                os.environ.get("SMB_TARGET_PURITY_EX_MEOH_FREE", "0.90"),
+            )
+        ),
+    )
+    parser.add_argument(
+        "--project-recovery-ga-min",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SMB_PROJECT_TARGET_RECOVERY_GA",
+                os.environ.get("SMB_TARGET_RECOVERY_GA", "0.90"),
+            )
+        ),
+    )
+    parser.add_argument(
+        "--project-recovery-ma-min",
+        type=float,
+        default=float(
+            os.environ.get(
+                "SMB_PROJECT_TARGET_RECOVERY_MA",
+                os.environ.get("SMB_TARGET_RECOVERY_MA", "0.90"),
+            )
+        ),
+    )
     parser.add_argument("--max-search-evals", type=int, default=int(os.environ.get("SMB_AGENT_MAX_SEARCH_EVALS", "18")))
     parser.add_argument("--max-validations", type=int, default=int(os.environ.get("SMB_AGENT_MAX_VALIDATIONS", "3")))
+    parser.add_argument(
+        "--executive-controller-enabled",
+        action="store_true",
+        default=os.environ.get("SMB_EXECUTIVE_CONTROLLER_ENABLED", "1") == "1",
+    )
+    parser.add_argument(
+        "--executive-trigger-rejects",
+        type=int,
+        default=int(os.environ.get("SMB_EXECUTIVE_TRIGGER_REJECTS", "2")),
+    )
+    parser.add_argument(
+        "--executive-force-after-rejects",
+        type=int,
+        default=int(os.environ.get("SMB_EXECUTIVE_FORCE_AFTER_REJECTS", "3")),
+    )
+    parser.add_argument(
+        "--executive-top-k-lock",
+        type=int,
+        default=int(os.environ.get("SMB_EXECUTIVE_TOP_K_LOCK", "5")),
+    )
     parser.add_argument("--llm-timeout-seconds", type=float, default=float(os.environ.get("SMB_LLM_TIMEOUT_SECONDS", "300")))
     parser.add_argument("--llm-max-retries", type=int, default=int(os.environ.get("SMB_LLM_MAX_RETRIES", "2")))
     parser.add_argument(
@@ -515,6 +565,15 @@ def configure_stage_args(base: argparse.Namespace, args: argparse.Namespace) -> 
     stage_args.purity_min = float(env_or_default("SMB_TARGET_PURITY_EX_MEOH_FREE", str(stage_args.purity_min)))
     stage_args.recovery_ga_min = float(env_or_default("SMB_TARGET_RECOVERY_GA", str(stage_args.recovery_ga_min)))
     stage_args.recovery_ma_min = float(env_or_default("SMB_TARGET_RECOVERY_MA", str(stage_args.recovery_ma_min)))
+    stage_args.project_purity_min = float(
+        env_or_default("SMB_PROJECT_TARGET_PURITY_EX_MEOH_FREE", str(getattr(args, "project_purity_min", stage_args.purity_min)))
+    )
+    stage_args.project_recovery_ga_min = float(
+        env_or_default("SMB_PROJECT_TARGET_RECOVERY_GA", str(getattr(args, "project_recovery_ga_min", stage_args.recovery_ga_min)))
+    )
+    stage_args.project_recovery_ma_min = float(
+        env_or_default("SMB_PROJECT_TARGET_RECOVERY_MA", str(getattr(args, "project_recovery_ma_min", stage_args.recovery_ma_min)))
+    )
     stage_args.meoh_max_raff_wt = float(env_or_default("SMB_MEOH_MAX_RAFF_WT", str(stage_args.meoh_max_raff_wt)))
     stage_args.water_max_ex_wt = float(env_or_default("SMB_WATER_MAX_EX_WT", str(stage_args.water_max_ex_wt)))
     stage_args.water_max_zone1_entry_wt = float(
@@ -906,9 +965,12 @@ def optimization_constraint_context_text(args: argparse.Namespace) -> str:
             f"tstep bounds: {getattr(args, 'tstep_bounds', '<unknown>')}",
             f"max pump flow ml/min: {getattr(args, 'max_pump_flow', '<unknown>')}",
             f"F1 max flow cap ml/min: {getattr(args, 'f1_max_flow', '<unknown>')}",
-            f"purity_ex_meoh_free minimum: {getattr(args, 'purity_min', '<unknown>')}",
-            f"recovery_ex_GA minimum: {getattr(args, 'recovery_ga_min', '<unknown>')}",
-            f"recovery_ex_MA minimum: {getattr(args, 'recovery_ma_min', '<unknown>')}",
+            f"exploratory purity_ex_meoh_free minimum: {getattr(args, 'purity_min', '<unknown>')}",
+            f"exploratory recovery_ex_GA minimum: {getattr(args, 'recovery_ga_min', '<unknown>')}",
+            f"exploratory recovery_ex_MA minimum: {getattr(args, 'recovery_ma_min', '<unknown>')}",
+            f"project purity_ex_meoh_free objective minimum: {getattr(args, 'project_purity_min', '<unknown>')}",
+            f"project recovery_ex_GA objective minimum: {getattr(args, 'project_recovery_ga_min', '<unknown>')}",
+            f"project recovery_ex_MA objective minimum: {getattr(args, 'project_recovery_ma_min', '<unknown>')}",
             f"raffinate MeOH max wt: {getattr(args, 'meoh_max_raff_wt', '<unknown>')}",
             f"extract Water max wt: {getattr(args, 'water_max_ex_wt', '<unknown>')}",
             f"zone1-entry Water max wt: {getattr(args, 'water_max_zone1_entry_wt', '<unknown>')}",
@@ -1083,6 +1145,9 @@ def start_research_log(
         f"- linear_solver: {args.linear_solver}",
         f"- nc_library: {args.nc_library}",
         f"- seed_library: {args.seed_library}",
+        f"- exploratory_targets: purity={getattr(args, 'purity_min', '')}, recovery_ga={getattr(args, 'recovery_ga_min', '')}, recovery_ma={getattr(args, 'recovery_ma_min', '')}",
+        f"- project_objective_targets: purity={getattr(args, 'project_purity_min', '')}, recovery_ga={getattr(args, 'project_recovery_ga_min', '')}, recovery_ma={getattr(args, 'project_recovery_ma_min', '')}",
+        f"- executive_controller: enabled={bool(getattr(args, 'executive_controller_enabled', False))}, trigger_rejects={getattr(args, 'executive_trigger_rejects', '')}, force_after={getattr(args, 'executive_force_after_rejects', '')}, top_k_lock={getattr(args, 'executive_top_k_lock', '')}",
         f"- sqlite_db: {args.sqlite_db}",
         "",
         "### Codebase Context Snapshot",
@@ -1139,6 +1204,7 @@ def append_iteration_research(
     task: Dict[str, object],
     a_note: Dict[str, object],
     b_note: Dict[str, object],
+    executive_note: Optional[Dict[str, object]] = None,
 ) -> None:
     lines = [
         f"\n### Search Iteration {iteration:02d}",
@@ -1208,6 +1274,18 @@ def append_iteration_research(
         lines.append("- scientist_b_required_checks:")
         for item in b_checks:
             lines.append(f"  - {item}")
+    if isinstance(executive_note, dict):
+        lines.append(f"- executive_decision: {executive_note.get('decision')}")
+        lines.append(f"- executive_reason: {executive_note.get('reason')}")
+        if executive_note.get("forced_task"):
+            lines.append(f"- executive_forced_task: {executive_note.get('forced_task')}")
+        if executive_note.get("forced_reason"):
+            lines.append(f"- executive_forced_reason: {executive_note.get('forced_reason')}")
+        e_updates = normalize_text_list(executive_note.get("priority_updates"), max_items=8)
+        if e_updates:
+            lines.append("- executive_priority_updates:")
+            for item in e_updates:
+                lines.append(f"  - {item}")
     append_research(path, "\n".join(lines) + "\n")
 
 
@@ -1341,6 +1419,108 @@ def deterministic_select(tasks: List[Dict[str, object]], tried: set[Tuple[Tuple[
         if key not in tried:
             return idx
     return 0
+
+
+def has_any_feasible(results: List[Dict[str, object]]) -> bool:
+    return any(bool(item.get("feasible")) for item in results)
+
+
+def ranked_reference_indices(tasks: List[Dict[str, object]]) -> List[int]:
+    return [idx for idx, task in enumerate(tasks) if str(task.get("seed_name", "")).strip().lower() == "reference"]
+
+
+def executive_forced_index(
+    tasks: List[Dict[str, object]],
+    tried: set[Tuple[Tuple[int, ...], str]],
+    top_k_lock: int,
+) -> Tuple[int, str]:
+    ref_idx = ranked_reference_indices(tasks)
+    top_ref = ref_idx[: max(1, top_k_lock)]
+    for idx in top_ref:
+        task = tasks[idx]
+        key = (tuple(task["nc"]), str(task["seed_name"]))
+        if key not in tried:
+            return idx, "first untried reference task inside executive top-k lock."
+    for idx in ref_idx:
+        task = tasks[idx]
+        key = (tuple(task["nc"]), str(task["seed_name"]))
+        if key not in tried:
+            return idx, "first untried reference task after top-k lock exhausted."
+    idx = deterministic_select(tasks, tried)
+    return idx, "fallback to first untried task because all reference tasks are exhausted."
+
+
+def executive_controller_decide(
+    args: argparse.Namespace,
+    tasks: List[Dict[str, object]],
+    tried: set[Tuple[Tuple[int, ...], str]],
+    candidate_idx: int,
+    candidate_task: Dict[str, object],
+    b_note: Dict[str, object],
+    search_results: List[Dict[str, object]],
+    consecutive_rejects: int,
+) -> Dict[str, object]:
+    decision = str(b_note.get("decision", "")).lower()
+    if decision == "approve":
+        return {
+            "decision": "not_needed",
+            "reason": "Scientist_B approved candidate; executive override not needed.",
+            "priority_updates": [],
+        }
+    if not bool(args.executive_controller_enabled):
+        return {
+            "decision": "disabled",
+            "reason": "Executive controller disabled by configuration.",
+            "priority_updates": [],
+        }
+    if has_any_feasible(search_results):
+        return {
+            "decision": "respect_reject",
+            "reason": "Feasible baseline exists; keep scientist rejection in effect.",
+            "priority_updates": [],
+        }
+    if consecutive_rejects < int(args.executive_trigger_rejects):
+        return {
+            "decision": "respect_reject",
+            "reason": f"Consecutive rejects={consecutive_rejects} below trigger={int(args.executive_trigger_rejects)}.",
+            "priority_updates": [],
+        }
+    if consecutive_rejects < int(args.executive_force_after_rejects):
+        return {
+            "decision": "respect_reject",
+            "reason": (
+                f"Consecutive rejects reached trigger ({consecutive_rejects} >= {int(args.executive_trigger_rejects)}), "
+                f"but below force_after={int(args.executive_force_after_rejects)}."
+            ),
+            "priority_updates": [
+                "Executive warning: next reject may force top-priority diagnostic execution."
+            ],
+        }
+
+    forced_idx, forced_reason = executive_forced_index(tasks, tried, int(args.executive_top_k_lock))
+    forced_task = tasks[forced_idx]
+    forced_key = (tuple(forced_task["nc"]), str(forced_task["seed_name"]))
+    if forced_key in tried:
+        return {
+            "decision": "respect_reject",
+            "reason": "No untried executive-forced task available; respecting rejection.",
+            "priority_updates": [],
+        }
+
+    return {
+        "decision": "override_execute",
+        "reason": (
+            f"Hard controller override: no feasible baseline and consecutive rejects={consecutive_rejects} "
+            f"(trigger={int(args.executive_trigger_rejects)}). Force execution of top-priority reference candidate."
+        ),
+        "forced_candidate_index": forced_idx,
+        "forced_task": forced_task,
+        "forced_reason": forced_reason,
+        "priority_updates": [
+            "Executive override executed to break reject loop and establish feasibility baseline.",
+            "Run top-ranked reference candidates before additional NC rotation.",
+        ],
+    }
 
 
 def deterministic_review(candidate: Dict[str, object], best_result: Optional[Dict[str, object]]) -> Dict[str, object]:
@@ -1814,6 +1994,9 @@ def execute_validation(args: argparse.Namespace, result: Dict[str, object], ordi
     base.nfex = 10
     base.nfet = 5
     base.ncp = 2
+    base.purity_min = float(args.project_purity_min)
+    base.recovery_ga_min = float(args.project_recovery_ga_min)
+    base.recovery_ma_min = float(args.project_recovery_ma_min)
     base.ffeed = flow["Ffeed"]
     base.f1 = flow["F1"]
     base.fdes = flow["Fdes"]
@@ -1893,6 +2076,7 @@ def main() -> int:
     validation_results: List[Dict[str, object]] = []
     scientist_a_log: List[Dict[str, object]] = []
     scientist_b_log: List[Dict[str, object]] = []
+    executive_log: List[Dict[str, object]] = []
     ledger: List[Dict[str, object]] = []
     tried: set[Tuple[Tuple[int, ...], str]] = set()
 
@@ -1932,6 +2116,7 @@ def main() -> int:
         search_hours_used = 0.0
         validation_hours_used = 0.0
         search_iteration = 0
+        consecutive_rejects = 0
 
         while (
             len(tried) < len(search_tasks)
@@ -1984,16 +2169,76 @@ def main() -> int:
                 search_iteration,
             )
             scientist_b_log.append({"task": task, "decision": b_note})
-            current_priorities = merge_priority_board(current_priorities, a_note, b_note)
-            append_iteration_research(research_path, search_iteration, task, a_note, b_note)
-            tried.add(task_key)
-            if str(b_note.get("decision", "approve")).lower() != "approve":
+            b_approved = str(b_note.get("decision", "approve")).lower() == "approve"
+            if b_approved:
+                consecutive_rejects = 0
+            else:
+                consecutive_rejects += 1
+
+            executive_note = executive_controller_decide(
+                args,
+                search_tasks,
+                tried,
+                idx,
+                task,
+                b_note,
+                search_results,
+                consecutive_rejects,
+            )
+            executive_log.append({"task": task, "decision": executive_note})
+            current_priorities = merge_priority_board(current_priorities, a_note, b_note, executive_note)
+            append_iteration_research(research_path, search_iteration, task, a_note, b_note, executive_note)
+
+            if not b_approved:
+                tried.add(task_key)
+                if str(executive_note.get("decision", "")).lower() != "override_execute":
+                    append_research(
+                        research_path,
+                        f"- search_result_run: skipped_by_scientist_b at {utc_now_text()} for task={task}\n",
+                    )
+                    continue
+
+                forced_idx = int(executive_note.get("forced_candidate_index", idx))
+                forced_task = search_tasks[forced_idx]
+                forced_key = (tuple(forced_task["nc"]), str(forced_task["seed_name"]))
+                if forced_key in tried:
+                    append_research(
+                        research_path,
+                        f"- search_result_run: executive_override_skipped_duplicate at {utc_now_text()} for task={forced_task}\n",
+                    )
+                    continue
+                tried.add(forced_key)
                 append_research(
                     research_path,
-                    f"- search_result_run: skipped_by_scientist_b at {utc_now_text()} for task={task}\n",
+                    f"- search_result_run: executive_override_execute at {utc_now_text()} from task={task} to forced_task={forced_task}\n",
                 )
+                result = execute_search_task(args, forced_task)
+                result["executive_forced"] = True
+                result["executive_forced_from_task"] = task
+                search_results.append(result)
+                persist_result_to_sqlite(sqlite_conn, args.run_name, "search", result)
+                append_result_research(research_path, result, "search")
+                append_research(
+                    research_path,
+                    "\n#### Insights and Trends Update\n"
+                    f"- timestamp_utc: {utc_now_text()}\n"
+                    + sqlite_layout_trend_table(sqlite_conn)
+                    + "\n",
+                )
+                ledger.append(
+                    {
+                        "phase": "search_executive_forced",
+                        "run_name": result.get("run_name"),
+                        "status": result.get("status"),
+                        "timing": result.get("timing"),
+                    }
+                )
+                timing = result.get("timing") or {}
+                search_hours_used += float(timing.get("wall_seconds", 0.0)) / 3600.0
+                consecutive_rejects = 0
                 continue
 
+            tried.add(task_key)
             result = execute_search_task(args, task)
             search_results.append(result)
             persist_result_to_sqlite(sqlite_conn, args.run_name, "search", result)
@@ -2061,6 +2306,17 @@ def main() -> int:
                 "fallback_model": args.fallback_llm_model if client.fallback_enabled else "",
                 "last_backend_used": client.last_backend,
             },
+            "executive_controller": {
+                "enabled": bool(args.executive_controller_enabled),
+                "trigger_rejects": int(args.executive_trigger_rejects),
+                "force_after_rejects": int(args.executive_force_after_rejects),
+                "top_k_lock": int(args.executive_top_k_lock),
+                "overrides_executed": sum(
+                    1
+                    for item in executive_log
+                    if str((item.get("decision") or {}).get("decision", "")).lower() == "override_execute"
+                ),
+            },
             "llm_conversations": {
                 "path": str(conversation_artifact.resolve()),
                 "stream_path": str(conversation_stream_artifact.resolve()),
@@ -2100,6 +2356,7 @@ def main() -> int:
             "codebase_context": code_context,
             "scientist_a_log": scientist_a_log,
             "scientist_b_log": scientist_b_log,
+            "executive_log": executive_log,
             "search_results": search_results,
             "validation_results": validation_results,
             "ranked_search_results": ranked_search,
