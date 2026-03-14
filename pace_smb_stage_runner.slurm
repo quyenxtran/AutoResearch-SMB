@@ -15,6 +15,11 @@
 # export SMB_NC_LIBRARY='1,2,3,2;2,2,2,2;1,3,2,2'
 # export SMB_SEED_LIBRARY='notebook'
 # sbatch --export=ALL,SMB_STAGE=optimize-layouts,SMB_RUN_NAME=minlp_baseline,SMB_LINEAR_SOLVER=mumps AutoResearch-SMB/pace_smb_stage_runner.slurm
+# export SMB_NC_LIBRARY='all'
+# export SMB_SEED_LIBRARY='notebook'
+# export SMB_TSTEP='9.4'
+# export SMB_TSTEP_BOUNDS='9.4,9.4'
+# sbatch --time=05:00:00 --export=ALL,SMB_STAGE=optimize-layouts,SMB_RUN_NAME=minlp_all_nc_5h,SMB_SOLVER_NAME=ipopt,SMB_LINEAR_SOLVER=mumps AutoResearch-SMB/pace_smb_stage_runner.slurm
 #
 # Override account, partition, or time at submit time if needed:
 # sbatch --account=gts-sn73 --qos=inferno --partition=cpu-amd --time=08:00:00 --export=ALL,SMB_STAGE=reference-eval AutoResearch-SMB/pace_smb_stage_runner.slurm
@@ -26,7 +31,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32G
-#SBATCH --time=08:00:00
+#SBATCH --time=05:00:00
 #SBATCH --mail-user=qtran47@gatech.edu
 #SBATCH --mail-type=END,FAIL
 #SBATCH --output=logs/%x-%j.out
@@ -117,6 +122,33 @@ fi
 export PYTHONUNBUFFERED=1
 export PATH="${VENV_DIR}/bin:${PATH}"
 
+# Ensure scratch-installed IPOPT is visible in batch jobs.
+IPOPT_BIN_DIR="${IPOPT_BIN_DIR:-}"
+if [[ -z "${IPOPT_BIN_DIR}" && -n "${DEFAULT_SCRATCH_ROOT}" ]]; then
+  IPOPT_BIN_DIR="${DEFAULT_SCRATCH_ROOT}/opt/ipopt/bin"
+fi
+IPOPT_LIB_DIR="${IPOPT_LIB_DIR:-}"
+if [[ -z "${IPOPT_LIB_DIR}" && -n "${DEFAULT_SCRATCH_ROOT}" ]]; then
+  IPOPT_LIB_DIR="${DEFAULT_SCRATCH_ROOT}/opt/ipopt/lib"
+fi
+OPENBLAS_LIBDIR="${OPENBLAS_LIBDIR:-/usr/local/pace-apps/manual/packages/fenics/2018/linux-rhel9-cascadelake/gcc-9.4.0/openblas-0.3.28-cg7h4gbbmohnlrdesf4ykgipgza67why/lib}"
+
+if [[ -n "${IPOPT_BIN_DIR}" && -d "${IPOPT_BIN_DIR}" ]]; then
+  export PATH="${IPOPT_BIN_DIR}:${PATH}"
+fi
+
+runtime_libs=()
+if [[ -n "${IPOPT_LIB_DIR}" && -d "${IPOPT_LIB_DIR}" ]]; then
+  runtime_libs+=("${IPOPT_LIB_DIR}")
+fi
+if [[ -n "${OPENBLAS_LIBDIR}" && -d "${OPENBLAS_LIBDIR}" ]]; then
+  runtime_libs+=("${OPENBLAS_LIBDIR}")
+fi
+if [[ ${#runtime_libs[@]} -gt 0 ]]; then
+  runtime_libs_joined="$(IFS=:; echo "${runtime_libs[*]}")"
+  export LD_LIBRARY_PATH="${runtime_libs_joined}:${LD_LIBRARY_PATH:-}"
+fi
+
 SMB_STAGE="${SMB_STAGE:-solver-check}"
 SMB_RUN_NAME="${SMB_RUN_NAME:-${SMB_STAGE}}"
 SMB_SOLVER_NAME="${SMB_SOLVER_NAME:-auto}"
@@ -205,6 +237,11 @@ echo "Repository root: ${REPO_ROOT}"
 echo "AutoResearch-SMB root: ${AUTORESEARCH_ROOT}"
 echo "SembaSMB root: ${SMB_ROOT}"
 echo "Python executable: ${VENV_PY}"
+echo "ipopt executable: $(command -v ipopt || echo not-found)"
+echo "ipopt_sens executable: $(command -v ipopt_sens || echo not-found)"
+echo "IPOPT_BIN_DIR: ${IPOPT_BIN_DIR:-<unset>}"
+echo "IPOPT_LIB_DIR: ${IPOPT_LIB_DIR:-<unset>}"
+echo "OPENBLAS_LIBDIR: ${OPENBLAS_LIBDIR:-<unset>}"
 echo "Stage: ${SMB_STAGE}"
 echo "Run name: ${SMB_RUN_NAME}"
 echo "CPUs per task: ${SLURM_CPUS_PER_TASK:-12}"
