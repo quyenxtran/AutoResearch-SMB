@@ -2127,24 +2127,48 @@ def main() -> int:
             sqlite_excerpt = sqlite_history_context(sqlite_conn)
             nc_strategy_excerpt = nc_strategy_board(sqlite_conn, nc_library_values)
             research_excerpt = read_research_tail(research_path, args.research_tail_chars)
-            idx, a_note = scientist_a_pick(
-                client,
-                search_tasks,
-                search_results,
-                tried,
-                optimize_stage_args,
-                objectives_excerpt,
-                soul_excerpt,
-                code_context_excerpt,
-                compute_context_excerpt,
-                constraint_context_excerpt,
-                nc_strategy_excerpt,
-                research_excerpt,
-                current_priorities,
-                sqlite_excerpt,
-                search_hours_used,
-                search_iteration,
-            )
+            try:
+                idx, a_note = scientist_a_pick(
+                    client,
+                    search_tasks,
+                    search_results,
+                    tried,
+                    optimize_stage_args,
+                    objectives_excerpt,
+                    soul_excerpt,
+                    code_context_excerpt,
+                    compute_context_excerpt,
+                    constraint_context_excerpt,
+                    nc_strategy_excerpt,
+                    research_excerpt,
+                    current_priorities,
+                    sqlite_excerpt,
+                    search_hours_used,
+                    search_iteration,
+                )
+            except Exception as exc:
+                idx = deterministic_select(search_tasks, tried)
+                a_note = {
+                    "mode": "deterministic_error",
+                    "reason": f"Scientist_A exception fallback: {type(exc).__name__}: {exc}",
+                    "priority_updates": [
+                        "Scientist_A call failed; fallback to deterministic first-untried candidate to keep run alive."
+                    ],
+                    "evidence": [
+                        "LLM Scientist_A call raised an exception.",
+                        "Using deterministic fallback to avoid hard stop.",
+                    ],
+                    "comparison_to_previous": [
+                        "No model comparison available due to Scientist_A exception."
+                    ],
+                    "nc_competitor_comparison": [
+                        "No model NC comparison available due to Scientist_A exception."
+                    ],
+                    "failure_criteria": [
+                        "Reject if solver status is solver_error/other with no usable primal values.",
+                        "Reject if normalized_total_violation does not improve against current best evidence.",
+                    ],
+                }
             task = search_tasks[idx]
             task_key = (tuple(task["nc"]), str(task["seed_name"]))
             if task_key in tried:
@@ -2153,21 +2177,28 @@ def main() -> int:
 
             effective_task = effective_search_task(args, task)
             best_so_far = rank_any_results(search_results)[0] if search_results else None
-            b_note = scientist_b_review(
-                client,
-                task,
-                effective_task,
-                best_so_far,
-                optimize_stage_args,
-                code_context_excerpt,
-                compute_context_excerpt,
-                constraint_context_excerpt,
-                nc_strategy_excerpt,
-                research_excerpt,
-                current_priorities,
-                sqlite_excerpt,
-                search_iteration,
-            )
+            try:
+                b_note = scientist_b_review(
+                    client,
+                    task,
+                    effective_task,
+                    best_so_far,
+                    optimize_stage_args,
+                    code_context_excerpt,
+                    compute_context_excerpt,
+                    constraint_context_excerpt,
+                    nc_strategy_excerpt,
+                    research_excerpt,
+                    current_priorities,
+                    sqlite_excerpt,
+                    search_iteration,
+                )
+            except Exception as exc:
+                b_note = {
+                    "mode": "deterministic_error",
+                    "reason": f"Scientist_B exception fallback: {type(exc).__name__}: {exc}",
+                    **deterministic_review(task, best_so_far),
+                }
             scientist_b_log.append({"task": task, "decision": b_note})
             b_approved = str(b_note.get("decision", "approve")).lower() == "approve"
             if b_approved:
@@ -2190,8 +2221,8 @@ def main() -> int:
             append_iteration_research(research_path, search_iteration, task, a_note, b_note, executive_note)
 
             if not b_approved:
-                tried.add(task_key)
                 if str(executive_note.get("decision", "")).lower() != "override_execute":
+                    tried.add(task_key)
                     append_research(
                         research_path,
                         f"- search_result_run: skipped_by_scientist_b at {utc_now_text()} for task={task}\n",
@@ -2201,12 +2232,14 @@ def main() -> int:
                 forced_idx = int(executive_note.get("forced_candidate_index", idx))
                 forced_task = search_tasks[forced_idx]
                 forced_key = (tuple(forced_task["nc"]), str(forced_task["seed_name"]))
-                if forced_key in tried:
+                if forced_key != task_key and forced_key in tried:
+                    tried.add(task_key)
                     append_research(
                         research_path,
                         f"- search_result_run: executive_override_skipped_duplicate at {utc_now_text()} for task={forced_task}\n",
                     )
                     continue
+                tried.add(task_key)
                 tried.add(forced_key)
                 append_research(
                     research_path,

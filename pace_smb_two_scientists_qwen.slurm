@@ -202,6 +202,11 @@ export SMB_FALLBACK_LLM_ENABLED="${SMB_FALLBACK_LLM_ENABLED:-1}"
 export SMB_FALLBACK_LLM_BASE_URL="${SMB_FALLBACK_LLM_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}"
 export SMB_FALLBACK_LLM_MODEL="${SMB_FALLBACK_LLM_MODEL:-gpt-5-nano}"
 export SMB_FALLBACK_LLM_API_KEY="${SMB_FALLBACK_LLM_API_KEY:-${OPENAI_API_KEY:-}}"
+if [[ "${SMB_TSTEP_BOUNDS}" != *,* ]]; then
+  echo "ERROR: SMB_TSTEP_BOUNDS='${SMB_TSTEP_BOUNDS}' is invalid. Expected 'min,max' (for example: 8.0,12.0)." >&2
+  echo "Hint: when using sbatch --export, set SMB_TSTEP_BOUNDS in the shell first: export SMB_TSTEP_BOUNDS=\"8.0,12.0\"" >&2
+  exit 2
+fi
 if [[ -n "${SMB_FALLBACK_LLM_API_KEY}" ]]; then
   SMB_FALLBACK_LLM_KEY_PRESENT="yes"
 else
