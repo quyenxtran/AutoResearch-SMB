@@ -193,17 +193,24 @@ export SMB_PROJECT_TARGET_PURITY_EX_MEOH_FREE="${SMB_PROJECT_TARGET_PURITY_EX_ME
 export SMB_PROJECT_TARGET_RECOVERY_GA="${SMB_PROJECT_TARGET_RECOVERY_GA:-0.85}"
 export SMB_PROJECT_TARGET_RECOVERY_MA="${SMB_PROJECT_TARGET_RECOVERY_MA:-0.85}"
 export SMB_EXECUTIVE_CONTROLLER_ENABLED="${SMB_EXECUTIVE_CONTROLLER_ENABLED:-1}"
-export SMB_EXECUTIVE_TRIGGER_REJECTS="${SMB_EXECUTIVE_TRIGGER_REJECTS:-2}"
-export SMB_EXECUTIVE_FORCE_AFTER_REJECTS="${SMB_EXECUTIVE_FORCE_AFTER_REJECTS:-3}"
-export SMB_EXECUTIVE_TOP_K_LOCK="${SMB_EXECUTIVE_TOP_K_LOCK:-5}"
+export SMB_EXECUTIVE_TRIGGER_REJECTS="${SMB_EXECUTIVE_TRIGGER_REJECTS:-1}"
+export SMB_EXECUTIVE_FORCE_AFTER_REJECTS="${SMB_EXECUTIVE_FORCE_AFTER_REJECTS:-2}"
+export SMB_EXECUTIVE_TOP_K_LOCK="${SMB_EXECUTIVE_TOP_K_LOCK:-3}"
 export SMB_OBJECTIVES_FILE="${SMB_OBJECTIVES_FILE:-${OBJECTIVES_FILE}}"
 export SMB_LLM_SOUL_FILE="${SMB_LLM_SOUL_FILE:-${LLM_SOUL_FILE}}"
 export SMB_IPOPT_RESOURCE_FILE="${SMB_IPOPT_RESOURCE_FILE:-${IPOPT_RESOURCE_FILE}}"
 export SMB_RESEARCH_MD="${SMB_RESEARCH_MD:-${REPO_ROOT}/research.md}"
 export SMB_REFERENCE_NOTEBOOK="${SMB_REFERENCE_NOTEBOOK:-${NOTEBOOK_REFERENCE}}"
 export SMB_REFERENCE_MODEL_ROOT="${SMB_REFERENCE_MODEL_ROOT:-${SMB_ROOT}}"
-export SMB_CURRENT_DEFAULT_SOLVER_STACK="${SMB_CURRENT_DEFAULT_SOLVER_STACK:-pyomo+ipopt_sens+ma57}"
-export SMB_AVAILABLE_SOLVER_OPTIONS="${SMB_AVAILABLE_SOLVER_OPTIONS:-pyomo+ipopt_sens+ma57(current_default_cpu); pyomo+ipopt_sens+mumps(cpu_if_installed); pyomo+ipopt_sens+pardiso(cpu_if_installed); pyomo+ipopt_sens+ma97(cpu_if_installed); madnlp+cudss(experimental_gpu_if_installed)}"
+export SMB_FORCE_MUMPS_ONLY="${SMB_FORCE_MUMPS_ONLY:-1}"
+export SMB_SOLVER_NAME="${SMB_SOLVER_NAME:-auto}"
+export SMB_LINEAR_SOLVER="${SMB_LINEAR_SOLVER:-mumps}"
+if [[ "${SMB_FORCE_MUMPS_ONLY}" == "1" && "${SMB_LINEAR_SOLVER}" != "mumps" ]]; then
+  echo "WARN: SMB_FORCE_MUMPS_ONLY=1 overrides SMB_LINEAR_SOLVER='${SMB_LINEAR_SOLVER}' -> 'mumps'" >&2
+  SMB_LINEAR_SOLVER="mumps"
+fi
+export SMB_CURRENT_DEFAULT_SOLVER_STACK="${SMB_CURRENT_DEFAULT_SOLVER_STACK:-pyomo+ipopt_sens+mumps}"
+export SMB_AVAILABLE_SOLVER_OPTIONS="${SMB_AVAILABLE_SOLVER_OPTIONS:-pyomo+ipopt_sens+mumps(forced_default_cpu)}"
 export SMB_AVAILABLE_ACCELERATION_OPTIONS="${SMB_AVAILABLE_ACCELERATION_OPTIONS:-optimized_blas_lapack_if_available; warm_starts; cpu_parallel_screening; fidelity_ladder; gpu_for_qwen_inference; experimental_gpu_nlp_solver_if_installed}"
 export SMB_RESOURCE_DECISION_POLICY="${SMB_RESOURCE_DECISION_POLICY:-model_may_choose_best_available_option_after_checking_installation_runtime_and_solution_quality}"
 export SMB_IPOPT_PROFILE_MENU="${SMB_IPOPT_PROFILE_MENU:-baseline_reproduction; screening_fast; balanced_cpu_mumps; robust_cpu_ma97; robust_cpu_mumps; high_end_pardiso; validation_strict}"
@@ -491,6 +498,9 @@ cat > "${ARTIFACT_DIR}/compute_manifest.${SLURM_JOB_ID:-local}.md" <<EOF
 - fallback_llm_api_key_present: ${SMB_FALLBACK_LLM_KEY_PRESENT}
 - reference_model_root: ${SMB_REFERENCE_MODEL_ROOT}
 - reference_notebook: ${SMB_REFERENCE_NOTEBOOK}
+- force_mumps_only: ${SMB_FORCE_MUMPS_ONLY}
+- solver_name: ${SMB_SOLVER_NAME}
+- linear_solver: ${SMB_LINEAR_SOLVER}
 - ffeed_bounds_ml_min: ${SMB_FFEED_BOUNDS_ML_MIN}
 - max_pump_flow_ml_min: ${SMB_MAX_PUMP_FLOW_ML_MIN}
 - tstep_bounds: ${SMB_TSTEP_BOUNDS}
@@ -538,6 +548,8 @@ echo "Fallback LLM API key present: ${SMB_FALLBACK_LLM_KEY_PRESENT}"
 echo "Reference notebook: ${NOTEBOOK_REFERENCE}"
 echo "Python executable: ${VENV_PY}"
 echo "Compute summary: ${SMB_COMPUTE_SUMMARY}"
+echo "Force MUMPS only: ${SMB_FORCE_MUMPS_ONLY}"
+echo "Solver selection: solver_name=${SMB_SOLVER_NAME}, linear_solver=${SMB_LINEAR_SOLVER}"
 echo "Current default solver stack: ${SMB_CURRENT_DEFAULT_SOLVER_STACK}"
 echo "Available solver options: ${SMB_AVAILABLE_SOLVER_OPTIONS}"
 echo "Available acceleration options: ${SMB_AVAILABLE_ACCELERATION_OPTIONS}"

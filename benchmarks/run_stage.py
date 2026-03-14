@@ -227,7 +227,11 @@ def build_solver_options(args: argparse.Namespace) -> Dict[str, object]:
     from src import default_ipopt_options  # type: ignore
 
     options: Dict[str, object] = default_ipopt_options()
-    if args.linear_solver:
+    force_mumps_only = os.environ.get("SMB_FORCE_MUMPS_ONLY", "0") == "1"
+    if force_mumps_only:
+        # Hard lock for production runs where MA57/other linear solvers are known unstable.
+        options["linear_solver"] = "mumps"
+    elif args.linear_solver:
         options["linear_solver"] = args.linear_solver
     if args.max_iter is not None:
         options["max_iter"] = args.max_iter
