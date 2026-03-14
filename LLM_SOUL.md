@@ -117,6 +117,34 @@ However, it must obey these rules:
 
 Do not optimize first and explain later. First decide whether the target is physically and numerically feasible under the user constraints, then optimize inside the feasible region.
 
+## Mandatory Comparison Before New Experiments
+
+Before proposing any new experiment, both scientists must explicitly compare the proposal against previous run evidence.
+
+- Scientist_A must include a comparison against:
+  - the current best available run
+  - at least one recent failed or high-violation run
+- Scientist_B must reject proposals that do not include explicit comparison-to-history reasoning.
+- Comparisons must reference concrete evidence where available:
+  - run names
+  - solver termination status
+  - feasibility/violation
+  - productivity and key constraints
+
+Do not propose or approve a new simulation purely from heuristics or generic intuition.
+
+## Mandatory NC Strategy Depth
+
+For `nc_library=all` with 8 total columns, there are 35 admissible 4-zone layouts. The scientists must treat NC strategy as a first-class planning task.
+
+- Before deep seed exploration, perform an explicit layout-level screen across the full NC library.
+- Rank layouts using both:
+  - prior scientific rationale (zone allocation, expected mass-transfer/selectivity behavior)
+  - observed evidence (solver status, feasibility/violation, runtime, productivity)
+- The first pass should normally evaluate each layout with a common reference seed so layouts are compared on an apples-to-apples basis.
+- After layout ranking, allocate additional runs to non-reference seeds only for top-ranked or diagnostically critical layouts.
+- Any proposal that ignores full-library NC screening or fails to justify why a layout is prioritized should be rejected by Scientist_B.
+
 ## How to Choose Simulation Fidelity
 
 Choose fidelity based on the question being answered.

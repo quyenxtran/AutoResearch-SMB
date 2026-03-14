@@ -39,6 +39,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-hours", type=float, default=float(os.environ.get("SMB_VALIDATION_BUDGET_HOURS", "1.0")))
     parser.add_argument("--max-search-evals", type=int, default=int(os.environ.get("SMB_AGENT_MAX_SEARCH_EVALS", "18")))
     parser.add_argument("--max-validations", type=int, default=int(os.environ.get("SMB_AGENT_MAX_VALIDATIONS", "3")))
+    parser.add_argument("--llm-timeout-seconds", type=float, default=float(os.environ.get("SMB_LLM_TIMEOUT_SECONDS", "300")))
+    parser.add_argument("--llm-max-retries", type=int, default=int(os.environ.get("SMB_LLM_MAX_RETRIES", "2")))
+    parser.add_argument(
+        "--llm-retry-backoff-seconds",
+        type=float,
+        default=float(os.environ.get("SMB_LLM_RETRY_BACKOFF_SECONDS", "2.0")),
+    )
+    parser.add_argument(
+        "--objectives-max-chars",
+        type=int,
+        default=int(os.environ.get("SMB_OBJECTIVES_MAX_CHARS", "10000")),
+    )
+    parser.add_argument(
+        "--llm-soul-max-chars",
+        type=int,
+        default=int(os.environ.get("SMB_LLM_SOUL_MAX_CHARS", "5000")),
+    )
+    parser.add_argument(
+        "--ipopt-resource-max-chars",
+        type=int,
+        default=int(os.environ.get("SMB_IPOPT_RESOURCE_MAX_CHARS", "2500")),
+    )
     parser.add_argument("--tee", action="store_true", default=os.environ.get("SMB_AGENT_TEE", "0") == "1")
     parser.add_argument("--llm-enabled", action="store_true", default=os.environ.get("SMB_AGENT_LLM_ENABLED", "1") == "1")
     parser.add_argument("--llm-base-url", default=os.environ.get("OLLAMA_BASE_URL", ""))
@@ -355,6 +377,119 @@ def sqlite_layout_trend_table(conn: sqlite3.Connection, max_rows: int = 10) -> s
     return "\n".join(lines)
 
 
+def nc_key(nc: Sequence[int]) -> str:
+    return ",".join(str(int(v)) for v in nc)
+
+
+def nc_prior_score(nc: Sequence[int]) -> float:
+    # Prior around the Kraton reference layout (1,2,3,2), with penalties for extreme asymmetry.
+    ref = (1, 2, 3, 2)
+    vals = [int(v) for v in nc]
+    dist_ref = sum(abs(vals[i] - ref[i]) for i in range(4))
+    singleton_count = sum(1 for v in vals if v == 1)
+    asymmetry = max(vals) - min(vals)
+    zone23_target_penalty = abs((vals[1] + vals[2]) - (ref[1] + ref[2]))
+    return 100.0 - 4.0 * dist_ref - 5.0 * singleton_count - 1.5 * asymmetry - 2.0 * zone23_target_penalty
+
+
+def sqlite_total_records_from_excerpt(text: str) -> int:
+    match = re.search(r"total_records=(\d+)", text or "")
+    return int(match.group(1)) if match else 0
+
+
+def text_mentions_prior_runs(items: Sequence[str]) -> bool:
+    pattern = re.compile(r"(run_name|run=|search_|validate_|reference-eval|optimize-layouts|status=|viol=|J=)")
+    return any(pattern.search(str(item)) for item in items)
+
+
+def nc_strategy_board(conn: sqlite3.Connection, nc_library: Sequence[Sequence[int]]) -> str:
+    unique_layouts: List[Tuple[int, int, int, int]] = []
+    seen: set[Tuple[int, int, int, int]] = set()
+    for nc in nc_library:
+        key = tuple(int(v) for v in nc)
+        if key not in seen:
+            seen.add(key)
+            unique_layouts.append(key)
+    if not unique_layouts:
+        return "NC strategy board unavailable: empty nc library."
+
+    stats: Dict[str, Dict[str, float]] = {}
+    placeholders = ",".join("?" for _ in unique_layouts)
+    rows = conn.execute(
+        f"""
+        SELECT
+            COALESCE(nc, '') AS nc,
+            COUNT(*) AS n_total,
+            COALESCE(SUM(CASE WHEN status='solver_error' THEN 1 ELSE 0 END), 0) AS n_solver_error,
+            COALESCE(SUM(CASE WHEN feasible=1 THEN 1 ELSE 0 END), 0) AS n_feasible,
+            MIN(normalized_total_violation) AS best_violation,
+            MAX(j_validated) AS best_j_validated,
+            MAX(productivity) AS best_productivity,
+            AVG(wall_seconds) AS avg_wall_seconds
+        FROM simulation_results
+        WHERE nc IN ({placeholders})
+        GROUP BY nc
+        """,
+        tuple(nc_key(nc) for nc in unique_layouts),
+    ).fetchall()
+    for row in rows:
+        stats[str(row[0])] = {
+            "n_total": float(row[1] or 0.0),
+            "n_solver_error": float(row[2] or 0.0),
+            "n_feasible": float(row[3] or 0.0),
+            "best_violation": float(row[4]) if row[4] is not None else float("inf"),
+            "best_j_validated": float(row[5]) if row[5] is not None else float("-inf"),
+            "best_productivity": float(row[6]) if row[6] is not None else float("-inf"),
+            "avg_wall_seconds": float(row[7]) if row[7] is not None else 0.0,
+        }
+
+    ranked: List[Tuple[float, Tuple[int, int, int, int], Dict[str, float]]] = []
+    for nc in unique_layouts:
+        key = nc_key(nc)
+        s = stats.get(
+            key,
+            {
+                "n_total": 0.0,
+                "n_solver_error": 0.0,
+                "n_feasible": 0.0,
+                "best_violation": float("inf"),
+                "best_j_validated": float("-inf"),
+                "best_productivity": float("-inf"),
+                "avg_wall_seconds": 0.0,
+            },
+        )
+        attempts = s["n_total"]
+        solver_error_rate = (s["n_solver_error"] / attempts) if attempts > 0 else 0.0
+        feasibility_bonus = 120.0 if s["n_feasible"] > 0 else 0.0
+        near_feasible_bonus = 0.0
+        if s["best_violation"] != float("inf"):
+            near_feasible_bonus = max(0.0, 30.0 - 20.0 * s["best_violation"])
+        runtime_penalty = min(20.0, s["avg_wall_seconds"] / 600.0) if s["avg_wall_seconds"] > 0 else 0.0
+        score = nc_prior_score(nc) + feasibility_bonus + near_feasible_bonus - 20.0 * solver_error_rate - runtime_penalty
+        ranked.append((score, nc, s))
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    lines = [
+        f"NC strategy board ({len(unique_layouts)} layouts in current library):",
+        "Scientific screening rubric:",
+        "- prioritize layouts near reference (1,2,3,2) unless evidence says otherwise",
+        "- penalize repeated solver_error histories and high average walltime",
+        "- favor layouts with stronger zone-2/zone-3 capacity and avoid extreme single-column fragmentation unless diagnostic",
+        "Ranked layouts (score combines prior + SQLite evidence):",
+    ]
+    for idx, (score, nc, s) in enumerate(ranked, start=1):
+        best_violation = "" if s["best_violation"] == float("inf") else f"{s['best_violation']:.6g}"
+        best_j = "" if s["best_j_validated"] == float("-inf") else f"{s['best_j_validated']:.6g}"
+        best_prod = "" if s["best_productivity"] == float("-inf") else f"{s['best_productivity']:.6g}"
+        lines.append(
+            f"- rank={idx:02d} nc={list(nc)} score={score:.2f} attempts={int(s['n_total'])} "
+            f"feasible={int(s['n_feasible'])} solver_error={int(s['n_solver_error'])} "
+            f"best_violation={best_violation or 'n/a'} best_prod={best_prod or 'n/a'} "
+            f"best_J={best_j or 'n/a'} avg_wall_s={s['avg_wall_seconds']:.1f}"
+        )
+    return "\n".join(lines)
+
+
 def configure_stage_args(base: argparse.Namespace, args: argparse.Namespace) -> argparse.Namespace:
     stage_args = argparse.Namespace(**vars(base))
     stage_args.solver_name = args.solver_name
@@ -400,6 +535,9 @@ class OpenAICompatClient:
         fallback_model: str = "",
         fallback_api_key: str = "",
         conversation_stream_path: Optional[Path] = None,
+        timeout_seconds: float = 300.0,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 2.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -418,6 +556,9 @@ class OpenAICompatClient:
         self.call_counter = 0
         self.conversations: List[Dict[str, object]] = []
         self.conversation_stream_path = conversation_stream_path
+        self.timeout_seconds = max(5.0, float(timeout_seconds))
+        self.max_retries = max(1, int(max_retries))
+        self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
 
     def _append_conversation_stream(self, record: Dict[str, object]) -> None:
         if self.conversation_stream_path is None:
@@ -437,6 +578,8 @@ class OpenAICompatClient:
         api_key: str,
         system_prompt: str,
         user_prompt: str,
+        temperature: float,
+        stop_sequences: Sequence[str],
     ) -> Tuple[Optional[str], str]:
         if not base_url or not model:
             return None, "missing_base_url_or_model"
@@ -444,36 +587,79 @@ class OpenAICompatClient:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.2,
-        }
-        req = request.Request(
-            f"{base_url}/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with request.urlopen(req, timeout=120) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-            return body["choices"][0]["message"]["content"], ""
-        except error.HTTPError as exc:
-            return None, f"http_error_{exc.code}"
-        except error.URLError as exc:
-            return None, f"url_error_{str(exc.reason)}"
-        except TimeoutError:
-            return None, "timeout"
-        except KeyError:
-            return None, "missing_choices_message_content"
-        except json.JSONDecodeError:
-            return None, "invalid_json_response"
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            return None, f"unexpected_error_{type(exc).__name__}"
+        def build_payload(include_stop: bool) -> Dict[str, object]:
+            payload: Dict[str, object] = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "temperature": temperature,
+            }
+            if include_stop:
+                payload["stop"] = list(stop_sequences)
+            return payload
+
+        # Some providers/models reject stop sequences with 400.
+        payload_variants = [("full", build_payload(True)), ("no_stop", build_payload(False))]
+        last_error = "unknown_error"
+
+        for variant_name, payload in payload_variants:
+            for attempt in range(1, self.max_retries + 1):
+                req = request.Request(
+                    f"{base_url}/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers=headers,
+                    method="POST",
+                )
+                try:
+                    with request.urlopen(req, timeout=self.timeout_seconds) as resp:
+                        body = json.loads(resp.read().decode("utf-8"))
+                    return body["choices"][0]["message"]["content"], ""
+                except error.HTTPError as exc:
+                    response_body = ""
+                    try:
+                        response_body = exc.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        response_body = ""
+                    response_body = " ".join(response_body.split())[:320]
+                    last_error = f"http_error_{exc.code}" + (f": {response_body}" if response_body else "")
+
+                    # Retry transient HTTP failures.
+                    if exc.code in {408, 429, 500, 502, 503, 504} and attempt < self.max_retries:
+                        if self.retry_backoff_seconds > 0:
+                            time.sleep(self.retry_backoff_seconds * attempt)
+                        continue
+
+                    # If the provider rejects stop controls, retry once without stop.
+                    if (
+                        exc.code == 400
+                        and variant_name == "full"
+                        and ("stop" in response_body.lower() or "unsupported" in response_body.lower())
+                    ):
+                        break
+                    return None, last_error
+                except error.URLError as exc:
+                    last_error = f"url_error_{str(exc.reason)}"
+                    if attempt < self.max_retries:
+                        if self.retry_backoff_seconds > 0:
+                            time.sleep(self.retry_backoff_seconds * attempt)
+                        continue
+                    return None, last_error
+                except TimeoutError:
+                    last_error = "timeout"
+                    if attempt < self.max_retries:
+                        if self.retry_backoff_seconds > 0:
+                            time.sleep(self.retry_backoff_seconds * attempt)
+                        continue
+                    return None, last_error
+                except KeyError:
+                    return None, "missing_choices_message_content"
+                except json.JSONDecodeError:
+                    return None, "invalid_json_response"
+                except Exception as exc:  # pragma: no cover - defensive fallback
+                    return None, f"unexpected_error_{type(exc).__name__}"
+        return None, last_error
 
     def chat(
         self,
@@ -481,7 +667,10 @@ class OpenAICompatClient:
         user_prompt: str,
         conversation_role: str = "generic",
         metadata: Optional[Dict[str, object]] = None,
+        temperature: float = 0.2,
+        stop_sequences: Optional[Sequence[str]] = None,
     ) -> Optional[str]:
+        resolved_stop = tuple(stop_sequences or ("<|endoftext|>", "<|im_start|>", "<|im_end|>"))
         self.call_counter += 1
         record: Dict[str, object] = {
             "call_id": self.call_counter,
@@ -496,7 +685,15 @@ class OpenAICompatClient:
         }
 
         if self.enabled:
-            content, err = self._chat_once(self.base_url, self.model, self.api_key, system_prompt, user_prompt)
+            content, err = self._chat_once(
+                self.base_url,
+                self.model,
+                self.api_key,
+                system_prompt,
+                user_prompt,
+                temperature,
+                resolved_stop,
+            )
             record["attempts"].append(
                 {
                     "backend": "primary",
@@ -520,6 +717,8 @@ class OpenAICompatClient:
                 self.fallback_api_key,
                 system_prompt,
                 user_prompt,
+                temperature,
+                resolved_stop,
             )
             record["attempts"].append(
                 {
@@ -547,14 +746,21 @@ class OpenAICompatClient:
     def extract_json(text: Optional[str]) -> Optional[Dict[str, object]]:
         if not text:
             return None
-        start = text.find("{")
-        end = text.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        try:
-            return json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            return None
+        cleaned = text
+        for marker in ("<|endoftext|>", "<|im_start|>", "<|im_end|>"):
+            idx = cleaned.find(marker)
+            if idx != -1:
+                cleaned = cleaned[:idx]
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r"{", cleaned):
+            start = match.start()
+            try:
+                candidate, _ = decoder.raw_decode(cleaned[start:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(candidate, dict):
+                return candidate
+        return None
 
 
 def read_doc_excerpt(path: str, max_chars: int = 4000) -> str:
@@ -658,18 +864,73 @@ def codebase_context_text(context: Dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def runtime_compute_context_text() -> str:
+    keys = [
+        "SMB_COMPUTE_SUMMARY",
+        "SMB_CPU_TASKS",
+        "SMB_GPU_COUNT",
+        "SMB_GPU_MODEL",
+        "SMB_MEMORY_GB",
+        "SMB_WALLTIME_HOURS",
+        "SMB_CURRENT_DEFAULT_SOLVER_STACK",
+        "SMB_AVAILABLE_SOLVER_OPTIONS",
+        "SMB_AVAILABLE_ACCELERATION_OPTIONS",
+        "SMB_RESOURCE_DECISION_POLICY",
+        "SMB_VERIFIED_IPOPT_EXECUTABLES",
+        "SMB_VERIFIED_IPOPT_LINEAR_SOLVERS",
+        "SMB_VERIFIED_IPOPT_PROFILE_MENU",
+        "SMB_VERIFIED_IPOPT_BASELINE_FALLBACK_TREE",
+        "SMB_VERIFIED_IPOPT_SCREENING_FALLBACK_TREE",
+        "SMB_VERIFIED_IPOPT_HARD_PROBLEM_FALLBACK_TREE",
+        "SMB_VERIFIED_IPOPT_HIGH_PERFORMANCE_FALLBACK_TREE",
+    ]
+    lines: List[str] = []
+    for key in keys:
+        value = os.environ.get(key, "")
+        if value:
+            lines.append(f"{key}={value}")
+    if not lines:
+        return "No runtime compute metadata found in environment."
+    return "\n".join(lines)
+
+
+def optimization_constraint_context_text(args: argparse.Namespace) -> str:
+    return "\n".join(
+        [
+            f"Flow bounds: F1 in {getattr(args, 'f1_bounds', '<unknown>')}",
+            "Flow bounds: "
+            + f"Ffeed in {getattr(args, 'ffeed_bounds', '<unknown>')}, "
+            + f"Fdes in {getattr(args, 'fdes_bounds', '<unknown>')}, "
+            + f"Fex in {getattr(args, 'fex_bounds', '<unknown>')}, "
+            + f"Fraf in {getattr(args, 'fraf_bounds', '<unknown>')}",
+            f"tstep bounds: {getattr(args, 'tstep_bounds', '<unknown>')}",
+            f"max pump flow ml/min: {getattr(args, 'max_pump_flow', '<unknown>')}",
+            f"F1 max flow cap ml/min: {getattr(args, 'f1_max_flow', '<unknown>')}",
+            f"purity_ex_meoh_free minimum: {getattr(args, 'purity_min', '<unknown>')}",
+            f"recovery_ex_GA minimum: {getattr(args, 'recovery_ga_min', '<unknown>')}",
+            f"recovery_ex_MA minimum: {getattr(args, 'recovery_ma_min', '<unknown>')}",
+            f"raffinate MeOH max wt: {getattr(args, 'meoh_max_raff_wt', '<unknown>')}",
+            f"extract Water max wt: {getattr(args, 'water_max_ex_wt', '<unknown>')}",
+            f"zone1-entry Water max wt: {getattr(args, 'water_max_zone1_entry_wt', '<unknown>')}",
+        ]
+    )
+
+
 def default_initial_priority_plan(args: argparse.Namespace) -> Dict[str, object]:
+    n_layouts = len(rs.parse_nc_library(args.nc_library))
     return {
         "mode": "deterministic",
         "priorities": [
             "Feasibility-first: reduce normalized_total_violation before maximizing productivity.",
             "Respect hard bounds and flow consistency: keep flows in configured bounds and treat raffinate as derived.",
+            f"Pre-screen all {n_layouts} NC layouts by evidence and scientific prior before deep seed sweeps.",
             "Screen layouts quickly at medium fidelity, then validate top candidates at high fidelity.",
             f"Use solver stack {args.solver_name}/{args.linear_solver} and track termination_condition per run.",
             "Use provisional metrics only as direction signals; prefer validated metrics for ranking.",
         ],
         "proposed_simulations": [
-            "Run each nc layout with notebook seeds and identify near-feasible candidates.",
+            "Run each nc layout with the reference seed first to establish layout ranking under fixed conditions.",
+            "Only then expand to non-reference seeds for top-ranked layouts.",
             "Perturb feed/desorbent/extract around best near-feasible point to reduce violation.",
             "Promote top candidates to high-fidelity validation.",
         ],
@@ -677,6 +938,10 @@ def default_initial_priority_plan(args: argparse.Namespace) -> Dict[str, object]
             "Local infeasibility from tight purity/recovery constraints.",
             "Solver-status 'other' without usable primal variables.",
             "Bounds clipping on internal velocities when tstep/flows are inconsistent.",
+        ],
+        "nc_screening_strategy": [
+            f"Screen all {n_layouts} NC layouts using the reference seed first, then expand seeds on top-ranked layouts.",
+            "Use NC ranking criteria: prior closeness to reference, solver-error history, best violation, and runtime cost.",
         ],
     }
 
@@ -688,6 +953,9 @@ def initial_priority_plan(
     soul_excerpt: str,
     codebase_excerpt: str,
     sqlite_excerpt: str,
+    nc_strategy_excerpt: str,
+    compute_context_excerpt: str,
+    constraint_context_excerpt: str,
 ) -> Dict[str, object]:
     default_plan = default_initial_priority_plan(args)
     prompt = textwrap.dedent(
@@ -702,14 +970,29 @@ def initial_priority_plan(
         Codebase context:
         {codebase_excerpt}
 
+        Runtime compute context:
+        {compute_context_excerpt}
+
+        Simulation objective/constraint context:
+        {constraint_context_excerpt}
+
         Existing SQLite run history:
         {sqlite_excerpt}
+
+        NC strategy board (screen all layouts before deep sweeps):
+        {nc_strategy_excerpt}
+
+        Requirements:
+        - provide concrete strategy for screening all NC layouts in this library before deep seed exploration
+        - reference compute budget explicitly
+        - reference constraints explicitly
 
         Respond with JSON only:
         {{
           "priorities": ["..."],
           "proposed_simulations": ["..."],
           "risks": ["..."],
+          "nc_screening_strategy": ["..."],
           "reason": "..."
         }}
         """
@@ -718,6 +1001,7 @@ def initial_priority_plan(
         "You are a principal SMB process scientist. Return JSON only.",
         prompt,
         conversation_role="initial_priority_plan",
+        temperature=0.2,
         metadata={
             "phase": "planning",
             "solver_name": args.solver_name,
@@ -732,6 +1016,7 @@ def initial_priority_plan(
     priorities = normalize_text_list(data.get("priorities"), max_items=8)
     simulations = normalize_text_list(data.get("proposed_simulations"), max_items=8)
     risks = normalize_text_list(data.get("risks"), max_items=8)
+    nc_screening_strategy = normalize_text_list(data.get("nc_screening_strategy"), max_items=10)
     if not priorities:
         return default_plan
     return {
@@ -739,6 +1024,7 @@ def initial_priority_plan(
         "priorities": priorities,
         "proposed_simulations": simulations or default_plan["proposed_simulations"],
         "risks": risks or default_plan["risks"],
+        "nc_screening_strategy": nc_screening_strategy or default_plan["nc_screening_strategy"],
         "reason": str(data.get("reason", "")),
         "raw": raw,
     }
@@ -774,8 +1060,11 @@ def start_research_log(
     path: Path,
     args: argparse.Namespace,
     code_context_text_block: str,
+    compute_context_text_block: str,
+    constraint_context_text_block: str,
     initial_plan: Dict[str, object],
     sqlite_excerpt: str,
+    nc_strategy_excerpt: str,
     layout_trends: str,
 ) -> None:
     if not path.exists():
@@ -801,9 +1090,24 @@ def start_research_log(
         code_context_text_block,
         "```",
         "",
+        "### Runtime Compute Snapshot",
+        "```text",
+        compute_context_text_block,
+        "```",
+        "",
+        "### Simulation Constraint Snapshot",
+        "```text",
+        constraint_context_text_block,
+        "```",
+        "",
         "### Existing History Snapshot",
         "```text",
         sqlite_excerpt,
+        "```",
+        "",
+        "### NC Strategy Board",
+        "```text",
+        nc_strategy_excerpt,
         "```",
         "",
         "### Initial Priorities",
@@ -813,6 +1117,10 @@ def start_research_log(
     section.append("")
     section.append("### Initial Proposed Simulations")
     for item in normalize_text_list(initial_plan.get("proposed_simulations"), max_items=12):
+        section.append(f"- {item}")
+    section.append("")
+    section.append("### NC Screening Strategy")
+    for item in normalize_text_list(initial_plan.get("nc_screening_strategy"), max_items=12):
         section.append(f"- {item}")
     section.append("")
     section.append("### Initial Risks")
@@ -850,6 +1158,55 @@ def append_iteration_research(
     if a_updates or b_updates:
         lines.append("- priority_updates:")
         for item in a_updates + b_updates:
+            lines.append(f"  - {item}")
+    a_compare = normalize_text_list(a_note.get("comparison_to_previous"), max_items=8)
+    if a_compare:
+        lines.append("- scientist_a_comparison_to_previous:")
+        for item in a_compare:
+            lines.append(f"  - {item}")
+    a_evidence = normalize_text_list(a_note.get("evidence"), max_items=8)
+    if a_evidence:
+        lines.append("- scientist_a_evidence:")
+        for item in a_evidence:
+            lines.append(f"  - {item}")
+    a_nc_comp = normalize_text_list(a_note.get("nc_competitor_comparison"), max_items=8)
+    if a_nc_comp:
+        lines.append("- scientist_a_nc_competitor_comparison:")
+        for item in a_nc_comp:
+            lines.append(f"  - {item}")
+    if str(a_note.get("diagnostic_hypothesis", "")).strip():
+        lines.append(f"- scientist_a_diagnostic_hypothesis: {str(a_note.get('diagnostic_hypothesis'))}")
+    a_fail = normalize_text_list(a_note.get("failure_criteria"), max_items=8)
+    if a_fail:
+        lines.append("- scientist_a_failure_criteria:")
+        for item in a_fail:
+            lines.append(f"  - {item}")
+    b_compare = normalize_text_list(b_note.get("comparison_assessment"), max_items=8)
+    if b_compare:
+        lines.append("- scientist_b_comparison_assessment:")
+        for item in b_compare:
+            lines.append(f"  - {item}")
+    b_nc_assess = normalize_text_list(b_note.get("nc_strategy_assessment"), max_items=8)
+    if b_nc_assess:
+        lines.append("- scientist_b_nc_strategy_assessment:")
+        for item in b_nc_assess:
+            lines.append(f"  - {item}")
+    if str(b_note.get("compute_assessment", "")).strip():
+        lines.append(f"- scientist_b_compute_assessment: {str(b_note.get('compute_assessment'))}")
+    b_counter = normalize_text_list(b_note.get("counterarguments"), max_items=8)
+    if b_counter:
+        lines.append("- scientist_b_counterarguments:")
+        for item in b_counter:
+            lines.append(f"  - {item}")
+    b_risks = normalize_text_list(b_note.get("risk_flags"), max_items=8)
+    if b_risks:
+        lines.append("- scientist_b_risk_flags:")
+        for item in b_risks:
+            lines.append(f"  - {item}")
+    b_checks = normalize_text_list(b_note.get("required_checks"), max_items=8)
+    if b_checks:
+        lines.append("- scientist_b_required_checks:")
+        for item in b_checks:
             lines.append(f"  - {item}")
     append_research(path, "\n".join(lines) + "\n")
 
@@ -991,12 +1348,32 @@ def deterministic_review(candidate: Dict[str, object], best_result: Optional[Dic
         return {
             "decision": "reject",
             "reason": "Already evaluated this layout and seed.",
+            "comparison_assessment": [
+                f"Compared against best prior run {best_result.get('run_name')} with same nc/seed; this would be a duplicate."
+            ],
+            "nc_strategy_assessment": [
+                "Candidate does not improve NC coverage because this nc/seed pair is already evaluated."
+            ],
+            "compute_assessment": "Reject duplicate to preserve budget for unexplored NC layouts and seeds.",
             "priority_updates": ["Avoid duplicate nc/seed evaluations unless bounds or fidelity changed."],
+            "counterarguments": ["No new evidence is provided for a duplicate nc/seed attempt."],
+            "risk_flags": ["Wasted budget on duplicate search point."],
+            "required_checks": ["Only retry duplicates when bounds/fidelity or solver stack changed."],
         }
     return {
         "decision": "approve",
         "reason": "Candidate is within current bounds and still untested.",
+        "comparison_assessment": [
+            "Compared candidate against tried set and current best run; this nc/seed has not been executed yet."
+        ],
+        "nc_strategy_assessment": [
+            "Candidate expands NC/seed evidence coverage and can improve ranking confidence across layout alternatives."
+        ],
+        "compute_assessment": "Approve as a bounded, untried point with acceptable incremental budget impact.",
         "priority_updates": ["Continue feasibility-first screening, then rank by productivity among low-violation runs."],
+        "counterarguments": ["Approval is provisional until solver status and post-check metrics are reviewed."],
+        "risk_flags": ["Potential local infeasibility despite bounded flows."],
+        "required_checks": ["Confirm effective post-bounds flow vector and solver termination condition."],
     }
 
 
@@ -1009,10 +1386,26 @@ def rank_any_results(results: List[Dict[str, object]]) -> List[Dict[str, object]
 
 def build_search_tasks(args: argparse.Namespace) -> List[Dict[str, object]]:
     nc_library = rs.parse_nc_library(args.nc_library)
+    nc_library = sorted(nc_library, key=nc_prior_score, reverse=True)
     seed_library = rs.parse_seed_library(args.seed_library)
+    if not seed_library:
+        return []
+
+    reference_idx = 0
+    for idx, seed in enumerate(seed_library):
+        if str(seed.get("name", "")).strip().lower() == "reference":
+            reference_idx = idx
+            break
+    reference_seed = seed_library[reference_idx]
+    remaining_seeds = [seed for i, seed in enumerate(seed_library) if i != reference_idx]
+
     tasks: List[Dict[str, object]] = []
+    # Pass 1: cover all layouts with the reference seed first.
     for nc in nc_library:
-        for seed in seed_library:
+        tasks.append({"nc": list(nc), "seed_name": str(reference_seed["name"]), "seed": reference_seed})
+    # Pass 2: deepen with non-reference seeds on the same ranked layout order.
+    for seed in remaining_seeds:
+        for nc in nc_library:
             tasks.append({"nc": list(nc), "seed_name": str(seed["name"]), "seed": seed})
     return tasks
 
@@ -1026,6 +1419,9 @@ def scientist_a_pick(
     objectives_excerpt: str,
     soul_excerpt: str,
     codebase_context_excerpt: str,
+    compute_context_excerpt: str,
+    constraint_context_excerpt: str,
+    nc_strategy_excerpt: str,
     research_excerpt: str,
     current_priorities: List[str],
     sqlite_context_excerpt: str,
@@ -1042,6 +1438,12 @@ def scientist_a_pick(
     prompt = textwrap.dedent(
         f"""
         You are Scientist_A for an SMB optimization benchmark.
+        Think aggressively and evidence-first. Do not give generic plans.
+        Every proposal must reference concrete signals from at least one of:
+        SQLite history, research log tail, compute context, or constraint context.
+        Before choosing a new experiment, you must compare it against previous results (at minimum: current best and one recent failed run).
+        If evidence is weak, propose a diagnostic run and state why.
+
         Objective summary:
         {objectives_excerpt}
 
@@ -1051,8 +1453,17 @@ def scientist_a_pick(
         Codebase context summary:
         {codebase_context_excerpt}
 
+        Runtime compute context:
+        {compute_context_excerpt}
+
+        Simulation objective/constraint context:
+        {constraint_context_excerpt}
+
         Current research log tail:
         {research_excerpt}
+
+        NC strategy board (all layouts in current library):
+        {nc_strategy_excerpt}
 
         Current priority board:
         {json.dumps(current_priorities, indent=2)}
@@ -1066,6 +1477,11 @@ def scientist_a_pick(
         Current best result:
         {summarize_result(best) if best else "None yet."}
 
+        Required rigor:
+        - compare candidate NC against at least two alternative NC layouts from the strategy board
+        - compare candidate against previous result evidence (current best + recent failure when available)
+        - include explicit compute/budget impact and stopping/failure criteria
+
         Remaining candidate shortlist:
         {json.dumps(shortlist, indent=2)}
 
@@ -1073,6 +1489,11 @@ def scientist_a_pick(
         {{
           "candidate_index": <0-based index into shortlist>,
           "reason": "<brief reason>",
+          "evidence": ["<specific evidence item>", "..."],
+          "comparison_to_previous": ["<explicit comparison to named prior run with metric/termination evidence>", "..."],
+          "nc_competitor_comparison": ["<candidate nc vs two alternatives with rationale>", "..."],
+          "diagnostic_hypothesis": "<what this run is testing>",
+          "failure_criteria": ["<what would make this a bad proposal>", "..."],
           "fidelity": "medium",
           "priority_updates": ["..."],
           "proposed_followups": ["..."]
@@ -1080,9 +1501,10 @@ def scientist_a_pick(
         """
     ).strip()
     raw = client.chat(
-        "You are a concise optimization scientist. Return JSON only.",
+        "You are an aggressive optimization scientist. Return JSON only and ground claims in evidence.",
         prompt,
         conversation_role="scientist_a_pick",
+        temperature=0.2,
         metadata={
             "iteration": iteration,
             "search_hours_used": budget_used,
@@ -1095,12 +1517,67 @@ def scientist_a_pick(
     if data and isinstance(data.get("candidate_index"), int):
         idx = int(data["candidate_index"])
         if 0 <= idx < len(shortlist):
+            evidence = normalize_text_list(data.get("evidence"), max_items=8)
+            comparisons = normalize_text_list(data.get("comparison_to_previous"), max_items=8)
+            nc_comparisons = normalize_text_list(data.get("nc_competitor_comparison"), max_items=8)
+            has_history = (len(results) > 0) or (sqlite_total_records_from_excerpt(sqlite_context_excerpt) > 0)
+            if len(evidence) < 2:
+                return default_index, {
+                    "mode": "deterministic",
+                    "reason": "Rejected LLM proposal: missing minimum evidence detail.",
+                    "priority_updates": [
+                        "Require at least two concrete evidence items (history/constraints/compute/signals) before proposing experiments."
+                    ],
+                }
+            if not comparisons:
+                return default_index, {
+                    "mode": "deterministic",
+                    "reason": "Rejected LLM proposal: missing required comparison to previous results.",
+                    "priority_updates": [
+                        "Require explicit comparison against prior runs (best and recent failures) before proposing new experiments."
+                    ],
+                }
+            if has_history and not text_mentions_prior_runs(comparisons):
+                return default_index, {
+                    "mode": "deterministic",
+                    "reason": "Rejected LLM proposal: comparison text does not cite concrete prior-run evidence.",
+                    "priority_updates": [
+                        "Require run-level evidence (run name/status/violation/productivity) in comparison-to-previous."
+                    ],
+                }
+            if len(nc_comparisons) < 2:
+                return default_index, {
+                    "mode": "deterministic",
+                    "reason": "Rejected LLM proposal: NC competitor comparison is too weak.",
+                    "priority_updates": [
+                        "Require explicit candidate-vs-alternative NC comparisons before choosing next run."
+                    ],
+                }
+            data["evidence"] = evidence
+            data["comparison_to_previous"] = comparisons
+            data["nc_competitor_comparison"] = nc_comparisons
+            data["failure_criteria"] = normalize_text_list(data.get("failure_criteria"), max_items=8)
+            data["diagnostic_hypothesis"] = str(data.get("diagnostic_hypothesis", "")).strip()
             chosen = shortlist[idx]
             absolute_idx = candidate_tasks.index(chosen)
             return absolute_idx, {"mode": "llm", "llm_backend": client.last_backend, "raw": raw, **data}
     return default_index, {
         "mode": "deterministic",
         "reason": "Falling back to deterministic candidate choice.",
+        "evidence": [
+            "LLM output unavailable or invalid JSON.",
+            "Deterministic fallback selected first untried task in ranked schedule."
+        ],
+        "comparison_to_previous": [
+            "LLM output unavailable; deterministic order selected after checking tried tasks and current best summary."
+        ],
+        "nc_competitor_comparison": [
+            "Deterministic fallback does not provide model-generated NC tradeoff reasoning."
+        ],
+        "failure_criteria": [
+            "Reject if solver status is solver_error/other with no usable primal values.",
+            "Reject if normalized_total_violation does not improve against current best evidence."
+        ],
         "priority_updates": [
             "Use deterministic task order when model output is unavailable; collect more observations before strategy changes."
         ],
@@ -1110,9 +1587,13 @@ def scientist_a_pick(
 def scientist_b_review(
     client: OpenAICompatClient,
     task: Dict[str, object],
+    effective_task: Dict[str, object],
     best_result: Optional[Dict[str, object]],
     args: argparse.Namespace,
     codebase_context_excerpt: str,
+    compute_context_excerpt: str,
+    constraint_context_excerpt: str,
+    nc_strategy_excerpt: str,
     research_excerpt: str,
     current_priorities: List[str],
     sqlite_context_excerpt: str,
@@ -1122,14 +1603,31 @@ def scientist_b_review(
     prompt = textwrap.dedent(
         f"""
         You are Scientist_B. Review this proposed SMB medium-fidelity optimization attempt.
+        Be adversarial and skeptical by default.
+        Reject if rationale is generic, evidence is weak, or compute/constraint tradeoffs are ignored.
+        You must explicitly compare the proposal against previous results before deciding.
+        If you approve, still provide the strongest counterarguments and explicit risk checks.
+
         Proposed task:
         {json.dumps(task, indent=2)}
+
+        Effective bounded candidate that will actually be executed:
+        {json.dumps(effective_task, indent=2)}
 
         Current best result:
         {summarize_result(best_result) if best_result else "None yet."}
 
         Codebase context summary:
         {codebase_context_excerpt}
+
+        Runtime compute context:
+        {compute_context_excerpt}
+
+        Simulation objective/constraint context:
+        {constraint_context_excerpt}
+
+        NC strategy board (all layouts in current library):
+        {nc_strategy_excerpt}
 
         Current research log tail:
         {research_excerpt}
@@ -1140,33 +1638,89 @@ def scientist_b_review(
         Historical simulation context (queried from SQLite):
         {sqlite_context_excerpt}
 
-        Hard bounds include:
-        - F1 in {args.f1_bounds}
-        - Ffeed, Fdes, Fex, Fraf in {args.ffeed_bounds}, {args.fdes_bounds}, {args.fex_bounds}, {args.fraf_bounds}
-        - tstep in {args.tstep_bounds}
-
         Respond with JSON only:
         {{
           "decision": "approve" or "reject",
           "reason": "<brief reason>",
+          "comparison_assessment": ["<explicit comparison vs prior run(s) with metric/termination evidence>", "..."],
+          "nc_strategy_assessment": ["<candidate nc vs alternatives and why>", "..."],
+          "compute_assessment": "<budget/time parallelism assessment>",
+          "counterarguments": ["<strongest objection 1>", "..."],
+          "required_checks": ["<check before trusting result>", "..."],
           "priority_updates": ["..."],
           "risk_flags": ["..."]
         }}
         """
     ).strip()
     raw = client.chat(
-        "You are a skeptical numerical scientist. Return JSON only.",
+        "You are a hard-nosed numerical reviewer. Return JSON only and challenge weak proposals.",
         prompt,
         conversation_role="scientist_b_review",
+        temperature=0.1,
         metadata={
             "iteration": iteration,
             "candidate_nc": task.get("nc"),
             "candidate_seed_name": task.get("seed_name"),
+            "effective_flow": effective_task.get("flow", {}),
             "has_best_result": best_result is not None,
         },
     )
     data = client.extract_json(raw)
     if data and str(data.get("decision", "")).lower() in {"approve", "reject"}:
+        comparisons = normalize_text_list(data.get("comparison_assessment"), max_items=8)
+        nc_assessment = normalize_text_list(data.get("nc_strategy_assessment"), max_items=8)
+        has_history = best_result is not None or (sqlite_total_records_from_excerpt(sqlite_context_excerpt) > 0)
+        if not comparisons:
+            data["decision"] = "reject"
+            data["reason"] = "Rejected: review must include explicit comparison to previous results."
+            data["priority_updates"] = normalize_text_list(data.get("priority_updates"), max_items=6) + [
+                "Require comparison-to-history before any approval decision."
+            ]
+            data["risk_flags"] = normalize_text_list(data.get("risk_flags"), max_items=6) + [
+                "Decision quality risk: no comparison against prior runs."
+            ]
+            data["comparison_assessment"] = [
+                "No comparison provided; cannot assess whether proposal improves on prior evidence."
+            ]
+        if has_history and not text_mentions_prior_runs(comparisons):
+            data["decision"] = "reject"
+            data["reason"] = "Rejected: review comparison lacks concrete prior-run references."
+            data["risk_flags"] = normalize_text_list(data.get("risk_flags"), max_items=6) + [
+                "Review quality risk: missing run-level evidence in comparison assessment."
+            ]
+            data["comparison_assessment"] = comparisons or [
+                "No run-level prior evidence referenced."
+            ]
+        if len(nc_assessment) < 2:
+            data["decision"] = "reject"
+            data["reason"] = "Rejected: review must include NC strategy assessment against alternatives."
+            data["risk_flags"] = normalize_text_list(data.get("risk_flags"), max_items=6) + [
+                "NC strategy assessment missing or too weak."
+            ]
+            data["nc_strategy_assessment"] = nc_assessment or [
+                "No explicit candidate-vs-alternative NC assessment was provided."
+            ]
+        if str(data.get("decision", "")).lower() == "approve":
+            counter = normalize_text_list(data.get("counterarguments"), max_items=3)
+            checks = normalize_text_list(data.get("required_checks"), max_items=3)
+            if not counter or not checks:
+                data["decision"] = "reject"
+                data["reason"] = "Rejected: approval must include explicit counterarguments and required checks."
+                data["priority_updates"] = normalize_text_list(data.get("priority_updates"), max_items=6) + [
+                    "Require adversarial review details before approving new tasks."
+                ]
+                data["risk_flags"] = normalize_text_list(data.get("risk_flags"), max_items=6) + [
+                    "Weak review quality due to missing counterarguments/checks."
+                ]
+                data["counterarguments"] = counter or [
+                    "No explicit counterargument was provided by the reviewer."
+                ]
+                data["required_checks"] = checks or [
+                    "Re-run review with explicit checks tied to bounds, solver behavior, and feasibility."
+                ]
+        data["comparison_assessment"] = normalize_text_list(data.get("comparison_assessment"), max_items=8)
+        data["nc_strategy_assessment"] = normalize_text_list(data.get("nc_strategy_assessment"), max_items=8)
+        data["compute_assessment"] = str(data.get("compute_assessment", "")).strip()
         return {"mode": "llm", "llm_backend": client.last_backend, "raw": raw, **data}
     return {"mode": "deterministic", **default}
 
@@ -1191,6 +1745,38 @@ def execute_search_task(args: argparse.Namespace, task: Dict[str, object]) -> Di
     )
     candidate_args.run_name = f"{args.run_name}_search_nc_{'-'.join(str(v) for v in task['nc'])}_{candidate_args.seed_name}"
     return rs.evaluate_optimized_layout(candidate_args, tuple(task["nc"]))
+
+
+def effective_search_task(args: argparse.Namespace, task: Dict[str, object]) -> Dict[str, object]:
+    base = configure_stage_args(make_stage_args("optimize-layouts"), args)
+    tstep_bounds = rs.parse_bounds(base.tstep_bounds)
+    ffeed_bounds = rs.parse_bounds(base.ffeed_bounds)
+    fdes_bounds = rs.parse_bounds(base.fdes_bounds)
+    fex_bounds = rs.parse_bounds(base.fex_bounds)
+    fraf_bounds = rs.parse_bounds(base.fraf_bounds)
+    f1_bounds = rs.parse_bounds(base.f1_bounds)
+    candidate_args = rs.apply_seed_to_args(
+        base,
+        task["seed"],
+        tstep_bounds=tstep_bounds,
+        ffeed_bounds=ffeed_bounds,
+        fdes_bounds=fdes_bounds,
+        fex_bounds=fex_bounds,
+        fraf_bounds=fraf_bounds,
+        f1_bounds=f1_bounds,
+    )
+    return {
+        "nc": list(task["nc"]),
+        "seed_name": str(candidate_args.seed_name),
+        "flow": {
+            "Ffeed": float(candidate_args.ffeed),
+            "F1": float(candidate_args.f1),
+            "Fdes": float(candidate_args.fdes),
+            "Fex": float(candidate_args.fex),
+            "Fraf": float(candidate_args.fraf),
+            "tstep": float(candidate_args.tstep),
+        },
+    }
 
 
 def build_validation_candidates(results: List[Dict[str, object]], max_items: int) -> List[Dict[str, object]]:
@@ -1279,9 +1865,9 @@ def main() -> int:
     conversation_artifact = conversation_log_path(args)
     conversation_stream_artifact = conversation_stream_log_path(args, conversation_artifact)
     research_path = Path(args.research_md)
-    objectives_excerpt = read_doc_excerpt(args.objectives_file, max_chars=5000)
-    soul_excerpt = read_doc_excerpt(args.llm_soul_file, max_chars=4000)
-    ipopt_excerpt = read_doc_excerpt(args.ipopt_resource_file, max_chars=2500)
+    objectives_excerpt = read_doc_excerpt(args.objectives_file, max_chars=args.objectives_max_chars)
+    soul_excerpt = read_doc_excerpt(args.llm_soul_file, max_chars=args.llm_soul_max_chars)
+    ipopt_excerpt = read_doc_excerpt(args.ipopt_resource_file, max_chars=args.ipopt_resource_max_chars)
     client = OpenAICompatClient(
         args.llm_base_url,
         args.llm_model,
@@ -1292,11 +1878,16 @@ def main() -> int:
         fallback_model=args.fallback_llm_model,
         fallback_api_key=args.fallback_llm_api_key,
         conversation_stream_path=conversation_stream_artifact,
+        timeout_seconds=args.llm_timeout_seconds,
+        max_retries=args.llm_max_retries,
+        retry_backoff_seconds=args.llm_retry_backoff_seconds,
     )
     sqlite_conn = open_sqlite_db(args.sqlite_db)
     optimize_stage_args = configure_stage_args(make_stage_args("optimize-layouts"), args)
     code_context = build_codebase_context()
     code_context_excerpt = codebase_context_text(code_context)
+    compute_context_excerpt = runtime_compute_context_text()
+    constraint_context_excerpt = optimization_constraint_context_text(optimize_stage_args)
 
     search_results: List[Dict[str, object]] = []
     validation_results: List[Dict[str, object]] = []
@@ -1309,7 +1900,9 @@ def main() -> int:
         initialize_conversation_stream(conversation_stream_artifact)
         if args.reset_research_section:
             reset_research_run_section(research_path, args.run_name)
+        nc_library_values = [list(nc) for nc in rs.parse_nc_library(args.nc_library)]
         initial_sqlite_excerpt = sqlite_history_context(sqlite_conn)
+        initial_nc_strategy_excerpt = nc_strategy_board(sqlite_conn, nc_library_values)
         initial_plan = initial_priority_plan(
             client,
             args,
@@ -1317,14 +1910,20 @@ def main() -> int:
             soul_excerpt,
             code_context_excerpt,
             initial_sqlite_excerpt,
+            initial_nc_strategy_excerpt,
+            compute_context_excerpt,
+            constraint_context_excerpt,
         )
         current_priorities = normalize_text_list(initial_plan.get("priorities"), max_items=16)
         start_research_log(
             research_path,
             args,
             code_context_excerpt,
+            compute_context_excerpt,
+            constraint_context_excerpt,
             initial_plan,
             initial_sqlite_excerpt,
+            initial_nc_strategy_excerpt,
             sqlite_layout_trend_table(sqlite_conn),
         )
 
@@ -1341,6 +1940,7 @@ def main() -> int:
         ):
             search_iteration += 1
             sqlite_excerpt = sqlite_history_context(sqlite_conn)
+            nc_strategy_excerpt = nc_strategy_board(sqlite_conn, nc_library_values)
             research_excerpt = read_research_tail(research_path, args.research_tail_chars)
             idx, a_note = scientist_a_pick(
                 client,
@@ -1351,6 +1951,9 @@ def main() -> int:
                 objectives_excerpt,
                 soul_excerpt,
                 code_context_excerpt,
+                compute_context_excerpt,
+                constraint_context_excerpt,
+                nc_strategy_excerpt,
                 research_excerpt,
                 current_priorities,
                 sqlite_excerpt,
@@ -1363,13 +1966,18 @@ def main() -> int:
                 break
             scientist_a_log.append({"task": task, "decision": a_note})
 
+            effective_task = effective_search_task(args, task)
             best_so_far = rank_any_results(search_results)[0] if search_results else None
             b_note = scientist_b_review(
                 client,
                 task,
+                effective_task,
                 best_so_far,
                 optimize_stage_args,
                 code_context_excerpt,
+                compute_context_excerpt,
+                constraint_context_excerpt,
+                nc_strategy_excerpt,
                 research_excerpt,
                 current_priorities,
                 sqlite_excerpt,
@@ -1474,6 +2082,8 @@ def main() -> int:
                 "objectives_excerpt": objectives_excerpt,
                 "llm_soul_excerpt": soul_excerpt,
                 "ipopt_resource_excerpt": ipopt_excerpt,
+                "compute_context_excerpt": compute_context_excerpt,
+                "constraint_context_excerpt": constraint_context_excerpt,
             },
             "sqlite": {
                 "db_path": str(Path(args.sqlite_db).resolve()),
@@ -1485,6 +2095,7 @@ def main() -> int:
                 "initial_plan": initial_plan,
                 "current_priorities": current_priorities,
                 "layout_trends_current": sqlite_layout_trend_table(sqlite_conn),
+                "nc_strategy_current": nc_strategy_board(sqlite_conn, nc_library_values),
             },
             "codebase_context": code_context,
             "scientist_a_log": scientist_a_log,
