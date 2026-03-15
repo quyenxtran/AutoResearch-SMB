@@ -28,29 +28,38 @@ def compute_purity_recovery(m, inputs: SMBInputs, outlets: Dict[str, List[float]
 
     ce_acid = sum(ce[i] for i in acid_idx)
     cf_acid = sum(inputs.dict_CF[i + 1] for i in acid_idx)
+    q_feed = value(m.UF)
+    q_ex = value(m.UE)
+    q_raff = value(m.UR)
 
     purity_ex_meoh_free = ce_acid / (sum(ce) - ce[-1])
     purity_ex_overall = ce_acid / sum(ce)
 
-    recovery_ex = ce_acid * value(m.UE) / (cf_acid * value(m.UF))
-    recovery_raff = sum(cr[i] for i in acid_idx) * value(m.UR) / (cf_acid * value(m.UF))
+    # Keep recovery definitions consistent with optimization constraints:
+    # RecoveryExGA / RecoveryExMA in smb_optimization.py use CE * UE / (CF * UF).
+    recovery_ex = ce_acid * q_ex / (cf_acid * q_feed)
+    recovery_raff = sum(cr[i] for i in acid_idx) * q_raff / (cf_acid * q_feed)
 
-    q_ex = value(m.UE) * inputs.area * inputs.eb
-    productivity_ex_ga_ma = ce_acid * q_ex
+    q_ex_ml_min = q_ex * inputs.area * inputs.eb
+    productivity_ex_ga_ma = ce_acid * q_ex_ml_min
     frec = (value(m.U[1]) - value(m.UD)) * inputs.area * inputs.eb
 
     per_comp_recovery = {}
     for i in acid_idx:
         comp_name = inputs.comps[i]
         cf_i = inputs.dict_CF[i + 1]
-        per_comp_recovery[f"recovery_ex_{comp_name}"] = ce[i] * value(m.UE) / (cf_i * value(m.UF))
-        per_comp_recovery[f"recovery_raff_{comp_name}"] = cr[i] * value(m.UR) / (cf_i * value(m.UF))
+        recovery_ex_i = ce[i] * q_ex / (cf_i * q_feed)
+        recovery_raff_i = cr[i] * q_raff / (cf_i * q_feed)
+        per_comp_recovery[f"recovery_ex_{comp_name}"] = recovery_ex_i
+        per_comp_recovery[f"recovery_raff_{comp_name}"] = recovery_raff_i
+        per_comp_recovery[f"recovery_balance_{comp_name}"] = recovery_ex_i + recovery_raff_i
 
     return {
         'purity_ex_meoh_free': purity_ex_meoh_free,
         'purity_ex_overall': purity_ex_overall,
         'recovery_ex': recovery_ex,
         'recovery_raff': recovery_raff,
+        'recovery_balance_acid': recovery_ex + recovery_raff,
         'productivity_ex_ga_ma': productivity_ex_ga_ma,
         'Frec': frec,
         **per_comp_recovery,

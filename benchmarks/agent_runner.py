@@ -34,9 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed-library", default=os.environ.get("SMB_SEED_LIBRARY", "notebook"))
     parser.add_argument("--solver-name", default=os.environ.get("SMB_SOLVER_NAME", "auto"))
     parser.add_argument("--linear-solver", default=os.environ.get("SMB_LINEAR_SOLVER", "mumps"))
-    parser.add_argument("--benchmark-hours", type=float, default=float(os.environ.get("SMB_BENCHMARK_HOURS", "5.0")))
-    parser.add_argument("--search-hours", type=float, default=float(os.environ.get("SMB_SEARCH_BUDGET_HOURS", "4.0")))
-    parser.add_argument("--validation-hours", type=float, default=float(os.environ.get("SMB_VALIDATION_BUDGET_HOURS", "1.0")))
+    parser.add_argument("--benchmark-hours", type=float, default=float(os.environ.get("SMB_BENCHMARK_HOURS", "12.0")))
+    parser.add_argument("--search-hours", type=float, default=float(os.environ.get("SMB_SEARCH_BUDGET_HOURS", "10.0")))
+    parser.add_argument("--validation-hours", type=float, default=float(os.environ.get("SMB_VALIDATION_BUDGET_HOURS", "2.0")))
     parser.add_argument(
         "--project-purity-min",
         type=float,
@@ -320,7 +320,7 @@ def sqlite_history_context(conn: sqlite3.Connection, max_feasible: int = 5, max_
 
     feasible_rows = conn.execute(
         """
-        SELECT candidate_run_name, nc, seed_name, j_validated, productivity
+        SELECT candidate_run_name, nc, seed_name, j_validated, productivity, purity, recovery_ga, recovery_ma
         FROM simulation_results
         WHERE feasible=1 AND j_validated IS NOT NULL
         ORDER BY j_validated DESC, productivity DESC, id DESC
@@ -331,7 +331,7 @@ def sqlite_history_context(conn: sqlite3.Connection, max_feasible: int = 5, max_
 
     near_rows = conn.execute(
         """
-        SELECT candidate_run_name, nc, seed_name, normalized_total_violation, productivity
+        SELECT candidate_run_name, nc, seed_name, normalized_total_violation, productivity, purity, recovery_ga, recovery_ma, metrics_validated
         FROM simulation_results
         WHERE feasible=0 AND normalized_total_violation IS NOT NULL
         ORDER BY normalized_total_violation ASC, productivity DESC, id DESC
@@ -342,7 +342,9 @@ def sqlite_history_context(conn: sqlite3.Connection, max_feasible: int = 5, max_
 
     recent_rows = conn.execute(
         """
-        SELECT candidate_run_name, nc, status, feasible, productivity, normalized_total_violation
+        SELECT
+            candidate_run_name, nc, status, feasible, productivity, purity, recovery_ga, recovery_ma,
+            normalized_total_violation, metrics_validated, ffeed, f1, fdes, fex, fraf, tstep, raw_json
         FROM simulation_results
         ORDER BY id DESC
         LIMIT ?
@@ -357,7 +359,7 @@ def sqlite_history_context(conn: sqlite3.Connection, max_feasible: int = 5, max_
     if feasible_rows:
         for row in feasible_rows:
             lines.append(
-                f"- {row[0]} nc={row[1]} seed={row[2]} J={row[3]} prod={row[4]}"
+                f"- {row[0]} nc={row[1]} seed={row[2]} J={row[3]} prod={row[4]} purity={row[5]} rGA={row[6]} rMA={row[7]}"
             )
     else:
         lines.append("- none")
@@ -366,7 +368,7 @@ def sqlite_history_context(conn: sqlite3.Connection, max_feasible: int = 5, max_
     if near_rows:
         for row in near_rows:
             lines.append(
-                f"- {row[0]} nc={row[1]} seed={row[2]} viol={row[3]} prod={row[4]}"
+                f"- {row[0]} nc={row[1]} seed={row[2]} viol={row[3]} prod={row[4]} purity={row[5]} rGA={row[6]} rMA={row[7]} metrics_validated={row[8]}"
             )
     else:
         lines.append("- none")
@@ -375,10 +377,75 @@ def sqlite_history_context(conn: sqlite3.Connection, max_feasible: int = 5, max_
     if recent_rows:
         for row in recent_rows:
             lines.append(
-                f"- {row[0]} nc={row[1]} status={row[2]} feasible={bool(row[3])} prod={row[4]} viol={row[5]}"
+                f"- {row[0]} nc={row[1]} status={row[2]} feasible={bool(row[3])} prod={row[4]} purity={row[5]} rGA={row[6]} rMA={row[7]} viol={row[8]} metrics_validated={row[9]} "
+                f"flow(Ffeed={row[10]},F1={row[11]},Fdes={row[12]},Fex={row[13]},Fraf={row[14]},tstep={row[15]})"
             )
     else:
         lines.append("- none")
+
+    lines.append("Recent composition snapshots (outlet CE/CR):")
+    comp_points: List[Dict[str, object]] = []
+    if recent_rows:
+        for row in recent_rows:
+            comp = composition_metrics_from_raw_json(str(row[16] or ""))
+            if not comp:
+                continue
+            point = {
+                "run_name": row[0],
+                "nc": row[1],
+                "ffeed": as_float(row[10]),
+                "tstep": as_float(row[15]),
+                **comp,
+            }
+            comp_points.append(point)
+            lines.append(
+                f"- {row[0]} nc={row[1]} Ffeed={row[10]} tstep={row[15]} "
+                f"CE_acid={comp['ce_acid']} CE_water={comp['ce_water']} CE_meoh={comp['ce_meoh']} "
+                f"CR_acid={comp['cr_acid']} CR_water={comp['cr_water']} CR_meoh={comp['cr_meoh']} source={comp['source']}"
+            )
+    if not comp_points:
+        lines.append("- none")
+    else:
+        lines.append("Flow/composition trend hints:")
+        slope_ffeed_ce_acid = linear_slope(
+            [as_float(item.get("ffeed")) for item in comp_points],
+            [as_float(item.get("ce_acid")) for item in comp_points],
+        )
+        slope_tstep_ce_acid = linear_slope(
+            [as_float(item.get("tstep")) for item in comp_points],
+            [as_float(item.get("ce_acid")) for item in comp_points],
+        )
+        if slope_ffeed_ce_acid is not None:
+            direction = "increases" if slope_ffeed_ce_acid > 0 else "decreases"
+            lines.append(f"- As Ffeed rises, CE_acid generally {direction} (slope={slope_ffeed_ce_acid:.6g}).")
+        if slope_tstep_ce_acid is not None:
+            direction = "increases" if slope_tstep_ce_acid > 0 else "decreases"
+            lines.append(f"- As tstep rises, CE_acid generally {direction} (slope={slope_tstep_ce_acid:.6g}).")
+
+        by_nc: Dict[str, Dict[str, float]] = {}
+        for item in comp_points:
+            nc_label = str(item.get("nc", ""))
+            bucket = by_nc.setdefault(nc_label, {"n": 0.0, "ce_acid_sum": 0.0, "cr_acid_sum": 0.0})
+            ce_acid = as_float(item.get("ce_acid"))
+            cr_acid = as_float(item.get("cr_acid"))
+            if ce_acid is None or cr_acid is None:
+                continue
+            bucket["n"] += 1.0
+            bucket["ce_acid_sum"] += ce_acid
+            bucket["cr_acid_sum"] += cr_acid
+        if by_nc:
+            lines.append("NC-level composition means (recent rows):")
+            ranked_nc = sorted(
+                by_nc.items(),
+                key=lambda kv: (kv[1]["ce_acid_sum"] / kv[1]["n"]) if kv[1]["n"] > 0 else float("-inf"),
+                reverse=True,
+            )
+            for nc_label, bucket in ranked_nc[:6]:
+                if bucket["n"] <= 0:
+                    continue
+                ce_mean = bucket["ce_acid_sum"] / bucket["n"]
+                cr_mean = bucket["cr_acid_sum"] / bucket["n"]
+                lines.append(f"- nc={nc_label} mean_CE_acid={ce_mean:.6g} mean_CR_acid={cr_mean:.6g} n={int(bucket['n'])}")
 
     return "\n".join(lines)
 
@@ -450,6 +517,42 @@ def sqlite_total_records_from_excerpt(text: str) -> int:
 def text_mentions_prior_runs(items: Sequence[str]) -> bool:
     pattern = re.compile(r"(run_name|run=|search_|validate_|reference-eval|optimize-layouts|status=|viol=|J=)")
     return any(pattern.search(str(item)) for item in items)
+
+
+def text_mentions_metric_signals(items: Sequence[str]) -> bool:
+    pattern = re.compile(
+        r"(prod(?:uctivity)?=|productivity|purity|recovery|rga=|rma=|viol(?:ation)?=|normalized_total_violation|J=|feasible=)",
+        flags=re.IGNORECASE,
+    )
+    return any(pattern.search(str(item)) for item in items)
+
+
+def extract_nc_mentions(text: str) -> set[Tuple[int, int, int, int]]:
+    mentions: set[Tuple[int, int, int, int]] = set()
+    if not text:
+        return mentions
+    pattern = re.compile(
+        r"(?:nc\s*[:=]\s*)?[\[\(]\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*[\]\)]",
+        flags=re.IGNORECASE,
+    )
+    for m in pattern.finditer(text):
+        mentions.add((int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))))
+    return mentions
+
+
+def review_references_candidate_nc(
+    reason: str,
+    comparisons: Sequence[str],
+    nc_assessment: Sequence[str],
+    candidate_nc: Sequence[int],
+) -> bool:
+    candidate = tuple(int(v) for v in candidate_nc)
+    blob = " ".join([str(reason)] + [str(x) for x in comparisons] + [str(x) for x in nc_assessment])
+    mentioned = extract_nc_mentions(blob)
+    # If no explicit NC text is present, we do not fail this check.
+    if not mentioned:
+        return True
+    return candidate in mentioned
 
 
 def nc_strategy_board(conn: sqlite3.Connection, nc_library: Sequence[Sequence[int]]) -> str:
@@ -1327,6 +1430,14 @@ def append_result_research(path: Path, result: Dict[str, object], phase: str) ->
         f"  - normalized_total_violation: {slacks.get('normalized_total_violation')}",
         f"  - flow: {flow}",
     ]
+    comp = composition_metrics_from_result(result)
+    if comp is not None:
+        lines.append(
+            "  - composition_ce_cr: "
+            + f"CE_acid={comp.get('ce_acid')} CE_water={comp.get('ce_water')} CE_meoh={comp.get('ce_meoh')} "
+            + f"CR_acid={comp.get('cr_acid')} CR_water={comp.get('cr_water')} CR_meoh={comp.get('cr_meoh')} "
+            + f"source={comp.get('source')}"
+        )
     append_research(path, "\n".join(lines) + "\n")
 
 
@@ -1395,14 +1506,108 @@ def effective_flow(result: Dict[str, object]) -> Optional[Dict[str, float]]:
     return None
 
 
+def stream_components_from_outlets(outlets: Dict[str, object], stream_key: str) -> Optional[Dict[str, float]]:
+    values = outlets.get(stream_key)
+    if not isinstance(values, (list, tuple)) or len(values) < 4:
+        return None
+    comps = [as_float(values[i]) for i in range(4)]
+    if any(v is None for v in comps):
+        return None
+    return {
+        "GA": float(comps[0]),
+        "MA": float(comps[1]),
+        "Water": float(comps[2]),
+        "MeOH": float(comps[3]),
+    }
+
+
+def composition_metrics_from_result(result: Dict[str, object]) -> Optional[Dict[str, object]]:
+    source = "validated"
+    outlets_obj = result.get("outlets")
+    if not isinstance(outlets_obj, dict):
+        provisional = result.get("provisional")
+        if isinstance(provisional, dict) and isinstance(provisional.get("outlets"), dict):
+            outlets_obj = provisional.get("outlets")
+            source = "provisional"
+        else:
+            return None
+    outlets = outlets_obj  # narrowed to dict
+    ce = stream_components_from_outlets(outlets, "CE")
+    cr = stream_components_from_outlets(outlets, "CR")
+    if ce is None or cr is None:
+        return None
+    return {
+        "source": source,
+        "ce_acid": ce["GA"] + ce["MA"],
+        "ce_water": ce["Water"],
+        "ce_meoh": ce["MeOH"],
+        "cr_acid": cr["GA"] + cr["MA"],
+        "cr_water": cr["Water"],
+        "cr_meoh": cr["MeOH"],
+    }
+
+
+def composition_metrics_from_raw_json(raw_json: str) -> Optional[Dict[str, object]]:
+    if not raw_json:
+        return None
+    try:
+        payload = json.loads(raw_json)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return composition_metrics_from_result(payload)
+
+
+def linear_slope(xs: Sequence[Optional[float]], ys: Sequence[Optional[float]]) -> Optional[float]:
+    pairs = [(float(x), float(y)) for x, y in zip(xs, ys) if x is not None and y is not None]
+    if len(pairs) < 2:
+        return None
+    mean_x = sum(x for x, _ in pairs) / len(pairs)
+    mean_y = sum(y for _, y in pairs) / len(pairs)
+    var_x = sum((x - mean_x) ** 2 for x, _ in pairs)
+    if var_x <= 1e-12:
+        return None
+    cov_xy = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
+    return cov_xy / var_x
+
+
+def inferred_violation_from_metrics(metrics: Dict[str, object]) -> Optional[float]:
+    purity = as_float(metrics.get("purity_ex_meoh_free"))
+    rga = as_float(metrics.get("recovery_ex_GA"))
+    rma = as_float(metrics.get("recovery_ex_MA"))
+    if purity is None and rga is None and rma is None:
+        return None
+
+    purity_min = float(env_or_default("SMB_TARGET_PURITY_EX_MEOH_FREE", "0.85"))
+    rga_min = float(env_or_default("SMB_TARGET_RECOVERY_GA", "0.85"))
+    rma_min = float(env_or_default("SMB_TARGET_RECOVERY_MA", "0.85"))
+
+    norm = 0.0
+    if purity is not None:
+        norm += max(0.0, purity_min - purity) / max(purity_min, 1e-12)
+    if rga is not None:
+        norm += max(0.0, rga_min - rga) / max(rga_min, 1e-12)
+    if rma is not None:
+        norm += max(0.0, rma_min - rma) / max(rma_min, 1e-12)
+    return norm
+
+
 def effective_violation(result: Dict[str, object]) -> float:
     slacks = result.get("constraint_slacks")
     if isinstance(slacks, dict) and "normalized_total_violation" in slacks:
         return float(slacks["normalized_total_violation"])
     provisional = result.get("provisional")
     if isinstance(provisional, dict):
+        provisional_slacks = provisional.get("constraint_slacks")
+        if isinstance(provisional_slacks, dict) and "normalized_total_violation" in provisional_slacks:
+            return float(provisional_slacks["normalized_total_violation"])
         metrics = provisional.get("metrics") or {}
-        return -float(metrics.get("productivity_ex_ga_ma", 0.0))
+        if isinstance(metrics, dict):
+            inferred = inferred_violation_from_metrics(metrics)
+            if inferred is not None:
+                return inferred
+            return -float(metrics.get("productivity_ex_ga_ma", 0.0))
     return 1e9
 
 
@@ -1665,7 +1870,7 @@ def scientist_a_pick(
         Historical simulation context (queried from SQLite):
         {sqlite_context_excerpt}
 
-        Counted benchmark budget is 5.0 SMB hours with 4.0 search hours and 1.0 validation hour.
+        Counted benchmark budget is {args.benchmark_hours:.1f} SMB hours with {args.search_hours:.1f} search hours and {args.validation_hours:.1f} validation hours.
         Search wall-hours used so far: {budget_used:.4f}
 
         Current best result:
@@ -1674,6 +1879,7 @@ def scientist_a_pick(
         Required rigor:
         - compare candidate NC against at least two alternative NC layouts from the strategy board
         - compare candidate against previous result evidence (current best + recent failure when available)
+        - include quantitative metric evidence in comparisons (at least one of: productivity, purity, recovery, violation, feasible/J)
         - include explicit compute/budget impact and stopping/failure criteria
 
         Remaining candidate shortlist:
@@ -1737,6 +1943,14 @@ def scientist_a_pick(
                     "reason": "Rejected LLM proposal: comparison text does not cite concrete prior-run evidence.",
                     "priority_updates": [
                         "Require run-level evidence (run name/status/violation/productivity) in comparison-to-previous."
+                    ],
+                }
+            if has_history and not text_mentions_metric_signals(comparisons):
+                return default_index, {
+                    "mode": "deterministic",
+                    "reason": "Rejected LLM proposal: comparison text is not metric-grounded.",
+                    "priority_updates": [
+                        "Require quantitative metrics (productivity/purity/recovery/violation/feasible/J) in comparison-to-previous."
                     ],
                 }
             if len(nc_comparisons) < 2:
@@ -1836,7 +2050,7 @@ def scientist_b_review(
         {{
           "decision": "approve" or "reject",
           "reason": "<brief reason>",
-          "comparison_assessment": ["<explicit comparison vs prior run(s) with metric/termination evidence>", "..."],
+          "comparison_assessment": ["<explicit comparison vs prior run(s) with quantitative metric/termination evidence>", "..."],
           "nc_strategy_assessment": ["<candidate nc vs alternatives and why>", "..."],
           "compute_assessment": "<budget/time parallelism assessment>",
           "counterarguments": ["<strongest objection 1>", "..."],
@@ -1864,6 +2078,20 @@ def scientist_b_review(
         comparisons = normalize_text_list(data.get("comparison_assessment"), max_items=8)
         nc_assessment = normalize_text_list(data.get("nc_strategy_assessment"), max_items=8)
         has_history = best_result is not None or (sqlite_total_records_from_excerpt(sqlite_context_excerpt) > 0)
+        if not review_references_candidate_nc(
+            str(data.get("reason", "")),
+            comparisons,
+            nc_assessment,
+            task.get("nc", []),
+        ):
+            data["decision"] = "reject"
+            data["reason"] = "Rejected: review appears to reference a different NC candidate than the proposed task."
+            data["risk_flags"] = normalize_text_list(data.get("risk_flags"), max_items=6) + [
+                "Review consistency risk: cited NC does not match proposed candidate."
+            ]
+            data["comparison_assessment"] = comparisons or [
+                "Unable to verify candidate-specific comparison; review appears to cite a different NC."
+            ]
         if not comparisons:
             data["decision"] = "reject"
             data["reason"] = "Rejected: review must include explicit comparison to previous results."
@@ -1884,6 +2112,15 @@ def scientist_b_review(
             ]
             data["comparison_assessment"] = comparisons or [
                 "No run-level prior evidence referenced."
+            ]
+        if has_history and not text_mentions_metric_signals(comparisons):
+            data["decision"] = "reject"
+            data["reason"] = "Rejected: review comparison is not metric-grounded."
+            data["risk_flags"] = normalize_text_list(data.get("risk_flags"), max_items=6) + [
+                "Review quality risk: comparison lacks quantitative metrics."
+            ]
+            data["comparison_assessment"] = comparisons or [
+                "No quantitative metric evidence referenced."
             ]
         if len(nc_assessment) < 2:
             data["decision"] = "reject"

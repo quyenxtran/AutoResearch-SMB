@@ -4,14 +4,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import signal
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import traceback
+from collections import deque
 from itertools import product
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Deque, Dict, Iterable, List, Sequence, Tuple
 
 from pyomo.environ import value
 
@@ -36,6 +40,362 @@ NOTEBOOK_SEEDS = [
     {"name": "optimized_2f1", "F1": 3.4, "Fdes": 1.9, "Fex": 1.7, "Ffeed": 2.5, "Fraf": 2.7, "tstep": 8.0},
     {"name": "optimized_2f2", "F1": 3.5, "Fdes": 1.9, "Fex": 1.7, "Ffeed": 2.5, "Fraf": 2.7, "tstep": 8.0},
 ]
+
+
+IPOPT_ITER_RE = re.compile(
+    r"^\s*(\d+)\s+([\-+0-9.eE]+)\s+([\-+0-9.eE]+)\s+([\-+0-9.eE]+)\s+([\-+0-9.eE]+)\s+([\-+0-9.eE]+)\s+([\-+0-9.eE]+)\s+([\-+0-9.eE]+)\s+([\-+0-9.eE]+)\S*\s+(\d+)\s*$"
+)
+
+
+class IpoptLiveMonitor:
+    def __init__(
+        self,
+        log_path: Path,
+        poll_seconds: float,
+        window_iters: int,
+        stall_eps: float,
+        watchdog_enabled: bool,
+        watchdog_min_iters: int,
+        watchdog_stall_windows: int,
+        watchdog_max_inf_du: float,
+        watchdog_max_mumps_realloc: int,
+        watchdog_kill_callback: Callable[[str], Dict[str, object]] | None = None,
+    ) -> None:
+        self.log_path = log_path
+        self.poll_seconds = max(0.1, float(poll_seconds))
+        self.window_iters = max(5, int(window_iters))
+        self.stall_eps = max(0.0, float(stall_eps))
+        self.watchdog_enabled = bool(watchdog_enabled)
+        self.watchdog_min_iters = max(1, int(watchdog_min_iters))
+        self.watchdog_stall_windows = max(1, int(watchdog_stall_windows))
+        self.watchdog_max_inf_du = max(0.0, float(watchdog_max_inf_du))
+        self.watchdog_max_mumps_realloc = max(0, int(watchdog_max_mumps_realloc))
+        self.watchdog_kill_callback = watchdog_kill_callback
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._iter_count = 0
+        self._last_iter = -1
+        self._last_objective: float | None = None
+        self._last_inf_pr: float | None = None
+        self._last_inf_du: float | None = None
+        self._min_inf_pr: float | None = None
+        self._min_inf_du: float | None = None
+        self._max_inf_du: float | None = None
+        self._ls_sum = 0
+        self._mumps_realloc_count = 0
+        self._stall_events = 0
+        self._window: Deque[Tuple[int, float]] = deque(maxlen=self.window_iters)
+        self._last_exit_line = ""
+        self._warnings: List[str] = []
+        self._watchdog_triggered = False
+        self._watchdog_reason = ""
+        self._watchdog_action: Dict[str, object] = {}
+
+    def start(self) -> None:
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            self.log_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+
+    def _run(self) -> None:
+        handle = None
+        while not self._stop_event.is_set():
+            try:
+                if handle is None:
+                    if not self.log_path.exists():
+                        time.sleep(self.poll_seconds)
+                        continue
+                    handle = self.log_path.open("r", encoding="utf-8", errors="replace")
+
+                line = handle.readline()
+                if line:
+                    self._consume_line(line.rstrip("\n"))
+                    continue
+                time.sleep(self.poll_seconds)
+            except Exception:
+                time.sleep(self.poll_seconds)
+        try:
+            if handle is not None:
+                handle.close()
+        except Exception:
+            pass
+
+    def _consume_line(self, line: str) -> None:
+        if "MUMPS returned INFO(1) = -9" in line:
+            self._mumps_realloc_count += 1
+            self._warnings.append("MUMPS requested memory reallocation (INFO(1)=-9).")
+            if (
+                self.watchdog_enabled
+                and self.watchdog_max_mumps_realloc > 0
+                and self._mumps_realloc_count >= self.watchdog_max_mumps_realloc
+                and not self._watchdog_triggered
+            ):
+                self._trigger_watchdog(
+                    f"MUMPS reallocations reached threshold {self._mumps_realloc_count}/{self.watchdog_max_mumps_realloc}."
+                )
+        if line.strip().startswith("WARNING:"):
+            self._warnings.append(line.strip())
+        if "EXIT:" in line:
+            self._last_exit_line = line.strip()
+
+        match = IPOPT_ITER_RE.match(line)
+        if not match:
+            return
+
+        it = int(match.group(1))
+        objective = float(match.group(2))
+        inf_pr = float(match.group(3))
+        inf_du = float(match.group(4))
+        ls = int(match.group(10))
+
+        self._iter_count += 1
+        self._last_iter = it
+        self._last_objective = objective
+        self._last_inf_pr = inf_pr
+        self._last_inf_du = inf_du
+        self._ls_sum += ls
+        self._min_inf_pr = inf_pr if self._min_inf_pr is None else min(self._min_inf_pr, inf_pr)
+        self._min_inf_du = inf_du if self._min_inf_du is None else min(self._min_inf_du, inf_du)
+        self._max_inf_du = inf_du if self._max_inf_du is None else max(self._max_inf_du, inf_du)
+
+        self._window.append((it, inf_pr))
+        if len(self._window) >= self.window_iters:
+            first_it, first_inf = self._window[0]
+            last_it, last_inf = self._window[-1]
+            denom = max(abs(first_inf), 1e-12)
+            rel_improve = (first_inf - last_inf) / denom
+            if (last_it - first_it) >= (self.window_iters - 1) and rel_improve <= self.stall_eps and last_inf > 1e-2:
+                self._stall_events += 1
+                if (
+                    self.watchdog_enabled
+                    and not self._watchdog_triggered
+                    and self._iter_count >= self.watchdog_min_iters
+                    and self._stall_events >= self.watchdog_stall_windows
+                ):
+                    self._trigger_watchdog(
+                        f"Primal infeasibility stalled: inf_pr window improvement <= {self.stall_eps:.3g} for {self._stall_events} windows."
+                    )
+        if (
+            self.watchdog_enabled
+            and not self._watchdog_triggered
+            and self.watchdog_max_inf_du > 0.0
+            and self._iter_count >= self.watchdog_min_iters
+            and inf_du >= self.watchdog_max_inf_du
+        ):
+            self._trigger_watchdog(
+                f"Dual infeasibility exceeded threshold: inf_du={inf_du:.6g} >= {self.watchdog_max_inf_du:.6g}."
+            )
+
+    def _trigger_watchdog(self, reason: str) -> None:
+        if self._watchdog_triggered:
+            return
+        self._watchdog_triggered = True
+        self._watchdog_reason = reason
+        self._warnings.append(f"WATCHDOG_TRIGGERED: {reason}")
+        action: Dict[str, object] = {"attempted": False, "reason": reason}
+        if self.watchdog_kill_callback is not None:
+            try:
+                action = self.watchdog_kill_callback(reason)
+            except Exception as exc:
+                action = {"attempted": True, "reason": reason, "errors": [f"kill_callback_failed: {type(exc).__name__}: {exc}"]}
+        self._watchdog_action = action
+
+    def snapshot(self) -> Dict[str, object]:
+        avg_ls = (self._ls_sum / self._iter_count) if self._iter_count > 0 else 0.0
+        suggestions: List[str] = []
+        if self._stall_events > 0:
+            suggestions.append(
+                f"Inf_pr stalled {self._stall_events} window(s); consider early-stop/seed-switch if stagnation persists."
+            )
+        if self._mumps_realloc_count > 0:
+            suggestions.append(
+                f"MUMPS memory reallocated {self._mumps_realloc_count} time(s); consider smaller fidelity or higher memory."
+            )
+        if (self._max_inf_du or 0.0) > 1e6:
+            suggestions.append("High dual infeasibility detected (>1e6); expect numerical stiffness.")
+        return {
+            "enabled": True,
+            "log_path": str(self.log_path),
+            "iterations_seen": self._iter_count,
+            "last_iter": self._last_iter,
+            "last_objective": self._last_objective,
+            "last_inf_pr": self._last_inf_pr,
+            "last_inf_du": self._last_inf_du,
+            "best_inf_pr": self._min_inf_pr,
+            "best_inf_du": self._min_inf_du,
+            "max_inf_du": self._max_inf_du,
+            "avg_ls": avg_ls,
+            "mumps_realloc_count": self._mumps_realloc_count,
+            "stall_events": self._stall_events,
+            "last_exit_line": self._last_exit_line,
+            "warnings": self._warnings[-20:],
+            "suggestions": suggestions,
+            "watchdog_enabled": self.watchdog_enabled,
+            "watchdog_triggered": self._watchdog_triggered,
+            "watchdog_reason": self._watchdog_reason,
+            "watchdog_action": self._watchdog_action,
+        }
+
+
+def terminate_ipopt_descendants(reason: str) -> Dict[str, object]:
+    action: Dict[str, object] = {
+        "attempted": False,
+        "reason": reason,
+        "found_pids": [],
+        "killed_pids": [],
+        "remaining_pids": [],
+        "errors": [],
+    }
+    try:
+        import psutil  # type: ignore
+    except Exception as exc:
+        action["errors"] = [f"psutil_unavailable: {type(exc).__name__}: {exc}"]
+        # Linux fallback without psutil.
+        try:
+            ps_out = subprocess.run(
+                ["ps", "-eo", "pid=,ppid=,comm=,args="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3.0,
+            ).stdout
+            parent_pid = os.getpid()
+            ppid_children: Dict[int, List[int]] = {}
+            proc_info: Dict[int, Tuple[str, str]] = {}
+            for line in ps_out.splitlines():
+                parts = line.strip().split(None, 3)
+                if len(parts) < 4:
+                    continue
+                try:
+                    pid = int(parts[0])
+                    ppid = int(parts[1])
+                except Exception:
+                    continue
+                comm = parts[2]
+                args = parts[3]
+                ppid_children.setdefault(ppid, []).append(pid)
+                proc_info[pid] = (comm, args)
+
+            descendants: List[int] = []
+            stack = list(ppid_children.get(parent_pid, []))
+            while stack:
+                child = stack.pop()
+                descendants.append(child)
+                stack.extend(ppid_children.get(child, []))
+
+            targets: List[int] = []
+            for pid in descendants:
+                info = proc_info.get(pid)
+                if not info:
+                    continue
+                comm_l = info[0].lower()
+                args_l = info[1].lower()
+                if "ipopt" in comm_l or "ipopt" in args_l:
+                    targets.append(pid)
+
+            action["found_pids"] = [int(pid) for pid in targets]
+            if not targets:
+                return action
+            action["attempted"] = True
+            for pid in targets:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except Exception as kill_exc:
+                    action["errors"].append(f"term_failed_pid_{pid}: {type(kill_exc).__name__}: {kill_exc}")
+            time.sleep(1.0)
+            alive: List[int] = []
+            for pid in targets:
+                try:
+                    os.kill(pid, 0)
+                    alive.append(pid)
+                except Exception:
+                    action["killed_pids"].append(pid)
+            for pid in alive:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                    action["killed_pids"].append(pid)
+                except Exception as kill_exc:
+                    action["errors"].append(f"kill_failed_pid_{pid}: {type(kill_exc).__name__}: {kill_exc}")
+            action["remaining_pids"] = []
+            for pid in alive:
+                try:
+                    os.kill(pid, 0)
+                    action["remaining_pids"].append(pid)
+                except Exception:
+                    pass
+        except Exception as fb_exc:
+            action["errors"].append(f"fallback_kill_failed: {type(fb_exc).__name__}: {fb_exc}")
+        return action
+
+    try:
+        current = psutil.Process(os.getpid())
+        children = current.children(recursive=True)
+        targets = []
+        for proc in children:
+            try:
+                name = (proc.name() or "").lower()
+                cmdline = " ".join(proc.cmdline()).lower()
+            except Exception:
+                continue
+            if "ipopt" in name or "ipopt" in cmdline:
+                targets.append(proc)
+        action["found_pids"] = [int(proc.pid) for proc in targets]
+        if not targets:
+            return action
+
+        action["attempted"] = True
+        for proc in targets:
+            try:
+                proc.terminate()
+            except Exception as exc:
+                action["errors"].append(f"terminate_failed_pid_{proc.pid}: {type(exc).__name__}: {exc}")
+        gone, alive = psutil.wait_procs(targets, timeout=3.0)
+        for proc in alive:
+            try:
+                proc.kill()
+            except Exception as exc:
+                action["errors"].append(f"kill_failed_pid_{proc.pid}: {type(exc).__name__}: {exc}")
+        gone2, alive2 = psutil.wait_procs(alive, timeout=2.0)
+        killed = list(gone) + list(gone2)
+        action["killed_pids"] = [int(proc.pid) for proc in killed]
+        action["remaining_pids"] = [int(proc.pid) for proc in alive2]
+    except Exception as exc:
+        action["errors"].append(f"watchdog_exception: {type(exc).__name__}: {exc}")
+    return action
+
+
+def maybe_start_ipopt_monitor(
+    args: argparse.Namespace,
+    watchdog_kill_callback: Callable[[str], Dict[str, object]] | None = None,
+) -> Tuple[IpoptLiveMonitor | None, Path | None]:
+    if not bool(getattr(args, "executive_live_monitor", False)):
+        return None, None
+    monitor_dir = Path(getattr(args, "ipopt_monitor_dir", str(REPO_ROOT / "artifacts" / "ipopt_live")))
+    stage_name = str(getattr(args, "stage", "stage")).replace("/", "_")
+    run_name = str(getattr(args, "run_name", "run")).replace("/", "_")
+    log_path = monitor_dir / f"{stage_name}.{run_name}.ipopt.log"
+    monitor = IpoptLiveMonitor(
+        log_path=log_path,
+        poll_seconds=float(getattr(args, "executive_monitor_poll_seconds", 1.0)),
+        window_iters=int(getattr(args, "executive_monitor_window_iters", 12)),
+        stall_eps=float(getattr(args, "executive_monitor_stall_eps", 0.01)),
+        watchdog_enabled=bool(getattr(args, "executive_watchdog_enabled", False)),
+        watchdog_min_iters=int(getattr(args, "executive_watchdog_min_iters", 80)),
+        watchdog_stall_windows=int(getattr(args, "executive_watchdog_stall_windows", 2)),
+        watchdog_max_inf_du=float(getattr(args, "executive_watchdog_max_inf_du", 0.0)),
+        watchdog_max_mumps_realloc=int(getattr(args, "executive_watchdog_max_mumps_realloc", 0)),
+        watchdog_kill_callback=watchdog_kill_callback,
+    )
+    monitor.start()
+    return monitor, log_path
 
 
 def parse_nc(raw: str) -> Tuple[int, int, int, int]:
@@ -239,6 +599,11 @@ def build_solver_options(args: argparse.Namespace) -> Dict[str, object]:
         options["tol"] = args.tol
     if args.acceptable_tol is not None:
         options["acceptable_tol"] = args.acceptable_tol
+    max_solve_seconds = float(getattr(args, "max_solve_seconds", 0.0) or 0.0)
+    if max_solve_seconds > 0:
+        # IPOPT-level kill switch for long or stalled runs.
+        options["max_wall_time"] = max_solve_seconds
+        options["max_cpu_time"] = max_solve_seconds
     return options
 
 
@@ -356,6 +721,27 @@ def normalized_constraint_violation(metrics: Dict[str, float], flow: FlowRates, 
     return slacks
 
 
+def try_constraint_slacks_from_metrics(
+    metrics_obj: object,
+    flow: FlowRates,
+    nc: Sequence[int],
+    args: argparse.Namespace,
+) -> Dict[str, float] | None:
+    if not isinstance(metrics_obj, dict):
+        return None
+    required = ("purity_ex_meoh_free", "recovery_ex_GA", "recovery_ex_MA")
+    metric_values: Dict[str, float] = {}
+    try:
+        for key in required:
+            metric_values[key] = safe_float(metrics_obj[key])  # type: ignore[index]
+    except Exception:
+        return None
+    try:
+        return normalized_constraint_violation(metric_values, flow, nc, args)
+    except Exception:
+        return None
+
+
 def extract_optimized_flows(m, inputs, run_name: str) -> FlowRates:
     area_eb = inputs.area * inputs.eb
     return FlowRates(
@@ -378,23 +764,85 @@ def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int]) -> Dict[str,
     )
 
     solver_name = resolve_solver_name(args.solver_name)
-    solver_options = build_solver_options(args)
+    solver_options = dict(build_solver_options(args))
     config = load_config(args, nc)
     flow = build_flow(args)
+    monitor, monitor_log_path = maybe_start_ipopt_monitor(args, watchdog_kill_callback=terminate_ipopt_descendants)
+    if monitor_log_path is not None:
+        solver_options["output_file"] = str(monitor_log_path)
+        solver_options.setdefault("file_print_level", 5)
+        solver_options.setdefault("print_level", 5)
 
     start_wall = time.perf_counter()
     start_cpu = time.process_time()
     inputs = build_inputs(config, flow)
     m = build_model(config, inputs)
     apply_discretization(m, config, inputs)
-    results = solve_model(m, solver_name=solver_name, options=solver_options, tee=args.tee)
+    solve_exc: Exception | None = None
+    results = None
+    try:
+        results = solve_model(m, solver_name=solver_name, options=solver_options, tee=args.tee)
+    except Exception as exc:
+        solve_exc = exc
+    finally:
+        if monitor is not None:
+            monitor.stop()
+    monitor_snapshot = monitor.snapshot() if monitor is not None else None
     end_wall = time.perf_counter()
     end_cpu = time.process_time()
-    solver_summary = solver_result_summary(results)
     cpus_used = int(os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SMB_CPU_TASKS", "1")))
     wall_seconds = end_wall - start_wall
     cpu_seconds = end_cpu - start_cpu
+    if solve_exc is not None:
+        watchdog_reason = ""
+        if isinstance(monitor_snapshot, dict):
+            watchdog_reason = str(monitor_snapshot.get("watchdog_reason", "") or "")
+        error_msg = f"Solver execution failed: {type(solve_exc).__name__}: {solve_exc}"
+        if watchdog_reason:
+            error_msg += f" | watchdog={watchdog_reason}"
+        payload = {
+            "status": "solver_error",
+            "stage": args.stage,
+            "run_name": args.run_name,
+            "nc": list(nc),
+            "flow": {
+                "Ffeed": flow.Ffeed,
+                "F1": flow.F1,
+                "Fdes": flow.Fdes,
+                "Fex": flow.Fex,
+                "Fraf": flow.Fraf,
+                "tstep": flow.tstep,
+            },
+            "fidelity": {"nfex": config.nfex, "nfet": config.nfet, "ncp": config.ncp, "xscheme": config.xscheme},
+            "solver": {
+                "solver_name": solver_name,
+                "solver_options": solver_options,
+            },
+            "executive_live_monitor": monitor_snapshot,
+            "error": error_msg,
+            "timing": {
+                "wall_seconds": wall_seconds,
+                "cpu_seconds_python": cpu_seconds,
+                "cpus_used_for_accounting": cpus_used,
+                "cpu_hours_accounted": wall_seconds * cpus_used / 3600.0,
+            },
+        }
+        provisional = try_collect_profile_payload(m, inputs)
+        if provisional is not None:
+            payload["provisional"] = {
+                "source": "infeasible_last_iterate",
+                "validated": False,
+                **provisional,
+            }
+            slacks = try_constraint_slacks_from_metrics(provisional.get("metrics"), flow, nc, args)
+            if slacks is not None:
+                payload["constraint_slacks"] = slacks
+                payload["feasible"] = False
+                payload["infeasible_converged"] = True
+                payload["J_validated"] = None
+        return payload
 
+    solver_summary = solver_result_summary(results)
     if not solver_result_usable(solver_summary):
         payload = {
             "status": "solver_error",
@@ -415,7 +863,15 @@ def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int]) -> Dict[str,
                 "solver_options": solver_options,
                 **solver_summary,
             },
-            "error": "Solver did not return a usable solution; metrics were not evaluated.",
+            "executive_live_monitor": monitor_snapshot,
+            "error": (
+                "Solver did not return a usable solution; metrics were not evaluated."
+                + (
+                    f" Watchdog triggered: {monitor_snapshot.get('watchdog_reason')}"
+                    if isinstance(monitor_snapshot, dict) and monitor_snapshot.get("watchdog_triggered")
+                    else ""
+                )
+            ),
             "timing": {
                 "wall_seconds": wall_seconds,
                 "cpu_seconds_python": cpu_seconds,
@@ -430,6 +886,12 @@ def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int]) -> Dict[str,
                 "validated": False,
                 **provisional,
             }
+            slacks = try_constraint_slacks_from_metrics(provisional.get("metrics"), flow, nc, args)
+            if slacks is not None:
+                payload["constraint_slacks"] = slacks
+                payload["feasible"] = False
+                payload["infeasible_converged"] = True
+                payload["J_validated"] = None
         return payload
 
     profile_payload = collect_profile_payload(m, inputs)
@@ -467,6 +929,7 @@ def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int]) -> Dict[str,
             "solver_options": solver_options,
             **solver_summary,
         },
+        "executive_live_monitor": monitor_snapshot,
         **profile_payload,
         "constraint_slacks": slacks,
         "feasible": feasible,
@@ -490,9 +953,14 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
     )
 
     solver_name = resolve_solver_name(args.solver_name)
-    solver_options = build_solver_options(args)
+    solver_options = dict(build_solver_options(args))
     config = load_config(args, nc)
     flow = build_flow(args)
+    monitor, monitor_log_path = maybe_start_ipopt_monitor(args, watchdog_kill_callback=terminate_ipopt_descendants)
+    if monitor_log_path is not None:
+        solver_options["output_file"] = str(monitor_log_path)
+        solver_options.setdefault("file_print_level", 5)
+        solver_options.setdefault("print_level", 5)
     tstep_bounds = parse_bounds(args.tstep_bounds)
     ffeed_bounds = parse_bounds(args.ffeed_bounds)
     fdes_bounds = parse_bounds(args.fdes_bounds)
@@ -523,16 +991,97 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
         f1_min=args.f1_min,
         f1_max=args.f1_max,
     )
-    results = solve_model(m, solver_name=solver_name, options=solver_options, tee=args.tee)
+    solve_exc: Exception | None = None
+    results = None
+    try:
+        results = solve_model(m, solver_name=solver_name, options=solver_options, tee=args.tee)
+    except Exception as exc:
+        solve_exc = exc
+    finally:
+        if monitor is not None:
+            monitor.stop()
+    monitor_snapshot = monitor.snapshot() if monitor is not None else None
     end_wall = time.perf_counter()
     end_cpu = time.process_time()
-
-    solver_summary = solver_result_summary(results)
     cpus_used = int(os.environ.get("SLURM_CPUS_PER_TASK", os.environ.get("SMB_CPU_TASKS", "1")))
     wall_seconds = end_wall - start_wall
     cpu_seconds = end_cpu - start_cpu
 
+    if solve_exc is not None:
+        watchdog_reason = ""
+        if isinstance(monitor_snapshot, dict):
+            watchdog_reason = str(monitor_snapshot.get("watchdog_reason", "") or "")
+        error_msg = f"Solver execution failed: {type(solve_exc).__name__}: {solve_exc}"
+        if watchdog_reason:
+            error_msg += f" | watchdog={watchdog_reason}"
+        slack_flow = flow
+        payload = {
+            "status": "solver_error",
+            "stage": args.stage,
+            "run_name": args.run_name,
+            "nc": list(nc),
+            "seed_name": getattr(args, "seed_name", None),
+            "seed_flow_original": getattr(args, "seed_flow_original", None),
+            "initial_flow": {
+                "Ffeed": flow.Ffeed,
+                "F1": flow.F1,
+                "Fdes": flow.Fdes,
+                "Fex": flow.Fex,
+                "Fraf": flow.Fraf,
+                "tstep": flow.tstep,
+            },
+            "solver": {
+                "solver_name": solver_name,
+                "solver_options": solver_options,
+            },
+            "executive_live_monitor": monitor_snapshot,
+            "optimization_bounds": {
+                "tstep_bounds": tstep_bounds,
+                "ffeed_bounds": ffeed_bounds,
+                "fdes_bounds": fdes_bounds,
+                "fex_bounds": fex_bounds,
+                "fraf_bounds": fraf_bounds,
+                "f1_bounds": f1_bounds,
+            },
+            "error": error_msg,
+            "timing": {
+                "wall_seconds": wall_seconds,
+                "cpu_seconds_python": cpu_seconds,
+                "cpus_used_for_accounting": cpus_used,
+                "cpu_hours_accounted": wall_seconds * cpus_used / 3600.0,
+            },
+        }
+        try:
+            provisional_flow = extract_optimized_flows(m, inputs, args.run_name)
+            slack_flow = provisional_flow
+            payload["provisional_optimized_flow"] = {
+                "Ffeed": provisional_flow.Ffeed,
+                "F1": provisional_flow.F1,
+                "Fdes": provisional_flow.Fdes,
+                "Fex": provisional_flow.Fex,
+                "Fraf": provisional_flow.Fraf,
+                "tstep": provisional_flow.tstep,
+            }
+        except Exception:
+            pass
+        provisional = try_collect_profile_payload(m, inputs)
+        if provisional is not None:
+            payload["provisional"] = {
+                "source": "infeasible_last_iterate",
+                "validated": False,
+                **provisional,
+            }
+            slacks = try_constraint_slacks_from_metrics(provisional.get("metrics"), slack_flow, nc, args)
+            if slacks is not None:
+                payload["constraint_slacks"] = slacks
+                payload["feasible"] = False
+                payload["infeasible_converged"] = True
+                payload["J_validated"] = None
+        return payload
+
+    solver_summary = solver_result_summary(results)
     if not solver_result_usable(solver_summary):
+        slack_flow = flow
         payload = {
             "status": "solver_error",
             "stage": args.stage,
@@ -553,6 +1102,7 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
                 "solver_options": solver_options,
                 **solver_summary,
             },
+            "executive_live_monitor": monitor_snapshot,
             "optimization_bounds": {
                 "tstep_bounds": tstep_bounds,
                 "ffeed_bounds": ffeed_bounds,
@@ -561,7 +1111,14 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
                 "fraf_bounds": fraf_bounds,
                 "f1_bounds": f1_bounds,
             },
-            "error": "Solver did not return a usable solution; optimized metrics were not evaluated.",
+            "error": (
+                "Solver did not return a usable solution; optimized metrics were not evaluated."
+                + (
+                    f" Watchdog triggered: {monitor_snapshot.get('watchdog_reason')}"
+                    if isinstance(monitor_snapshot, dict) and monitor_snapshot.get("watchdog_triggered")
+                    else ""
+                )
+            ),
             "timing": {
                 "wall_seconds": wall_seconds,
                 "cpu_seconds_python": cpu_seconds,
@@ -571,6 +1128,7 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
         }
         try:
             provisional_flow = extract_optimized_flows(m, inputs, args.run_name)
+            slack_flow = provisional_flow
             payload["provisional_optimized_flow"] = {
                 "Ffeed": provisional_flow.Ffeed,
                 "F1": provisional_flow.F1,
@@ -588,6 +1146,12 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
                 "validated": False,
                 **provisional,
             }
+            slacks = try_constraint_slacks_from_metrics(provisional.get("metrics"), slack_flow, nc, args)
+            if slacks is not None:
+                payload["constraint_slacks"] = slacks
+                payload["feasible"] = False
+                payload["infeasible_converged"] = True
+                payload["J_validated"] = None
         return payload
 
     optimized_flow = extract_optimized_flows(m, inputs, args.run_name)
@@ -636,6 +1200,7 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
             "solver_options": solver_options,
             **solver_summary,
         },
+        "executive_live_monitor": monitor_snapshot,
         "optimization_bounds": {
             "tstep_bounds": tstep_bounds,
             "ffeed_bounds": ffeed_bounds,
@@ -892,6 +1457,52 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-iter", type=int)
     parser.add_argument("--tol", type=float)
     parser.add_argument("--acceptable-tol", type=float)
+    parser.add_argument("--max-solve-seconds", type=float, default=float(os.environ.get("SMB_MAX_SOLVE_SECONDS", "0")))
+    parser.add_argument("--executive-live-monitor", action="store_true", default=os.environ.get("SMB_EXECUTIVE_LIVE_MONITOR", "0") == "1")
+    parser.add_argument(
+        "--executive-monitor-poll-seconds",
+        type=float,
+        default=float(os.environ.get("SMB_EXECUTIVE_MONITOR_POLL_SECONDS", "1.0")),
+    )
+    parser.add_argument(
+        "--executive-monitor-window-iters",
+        type=int,
+        default=int(os.environ.get("SMB_EXECUTIVE_MONITOR_WINDOW_ITERS", "12")),
+    )
+    parser.add_argument(
+        "--executive-monitor-stall-eps",
+        type=float,
+        default=float(os.environ.get("SMB_EXECUTIVE_MONITOR_STALL_EPS", "0.01")),
+    )
+    parser.add_argument(
+        "--ipopt-monitor-dir",
+        default=os.environ.get("SMB_IPOPT_MONITOR_DIR", str(REPO_ROOT / "artifacts" / "ipopt_live")),
+    )
+    parser.add_argument(
+        "--executive-watchdog-enabled",
+        action="store_true",
+        default=os.environ.get("SMB_EXECUTIVE_WATCHDOG_ENABLED", "0") == "1",
+    )
+    parser.add_argument(
+        "--executive-watchdog-min-iters",
+        type=int,
+        default=int(os.environ.get("SMB_EXECUTIVE_WATCHDOG_MIN_ITERS", "80")),
+    )
+    parser.add_argument(
+        "--executive-watchdog-stall-windows",
+        type=int,
+        default=int(os.environ.get("SMB_EXECUTIVE_WATCHDOG_STALL_WINDOWS", "2")),
+    )
+    parser.add_argument(
+        "--executive-watchdog-max-inf-du",
+        type=float,
+        default=float(os.environ.get("SMB_EXECUTIVE_WATCHDOG_MAX_INF_DU", "0")),
+    )
+    parser.add_argument(
+        "--executive-watchdog-max-mumps-realloc",
+        type=int,
+        default=int(os.environ.get("SMB_EXECUTIVE_WATCHDOG_MAX_MUMPS_REALLOC", "0")),
+    )
     parser.add_argument("--tee", action="store_true")
 
     parser.add_argument("--nc", default="1,2,3,2")
