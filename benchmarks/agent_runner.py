@@ -824,17 +824,20 @@ class OpenAICompatClient:
                             time.sleep(self.retry_backoff_seconds * attempt)
                         continue
 
-                    # If the provider rejects stop controls, retry with the next payload variant.
+                    # If the provider rejects stop controls, retry with the next payload variant
+                    # that omits stop. This must apply to any variant that currently includes stop.
                     if (
                         exc.code == 400
-                        and variant_name == "full"
-                        and ("stop" in response_body.lower() or "unsupported" in response_body.lower())
+                        and "stop" in payload
+                        and "stop" in response_body.lower()
+                        and ("unsupported" in response_body.lower() or "not supported" in response_body.lower())
                     ):
                         break
-                    # If the provider rejects custom temperature values, retry without temperature.
+                    # If the provider rejects custom temperature values, retry with the next payload
+                    # variant that omits temperature.
                     if (
                         exc.code == 400
-                        and variant_name in {"full", "no_stop"}
+                        and "temperature" in payload
                         and "temperature" in response_body.lower()
                         and ("unsupported" in response_body.lower() or "default" in response_body.lower())
                     ):
@@ -1349,13 +1352,21 @@ def append_iteration_research(
     task: Dict[str, object],
     a_note: Dict[str, object],
     b_note: Dict[str, object],
+    scientist_a_proposed_task: Optional[Dict[str, object]] = None,
+    effective_task_after_policy: Optional[Dict[str, object]] = None,
+    scientist_b_reviewed_task: Optional[Dict[str, object]] = None,
     executive_note: Optional[Dict[str, object]] = None,
 ) -> None:
+    proposed_task = scientist_a_proposed_task or task
+    reviewed_task = scientist_b_reviewed_task or task
     lines = [
         f"\n### Search Iteration {iteration:02d}",
         f"- timestamp_utc: {utc_now_text()}",
         f"- candidate_nc: {task.get('nc')}",
         f"- candidate_seed: {task.get('seed_name')}",
+        f"- scientist_a_proposed_task: {proposed_task}",
+        f"- effective_task_after_policy: {effective_task_after_policy if isinstance(effective_task_after_policy, dict) else task}",
+        f"- scientist_b_reviewed_task: {reviewed_task}",
         f"- scientist_a_reason: {a_note.get('reason')}",
         f"- scientist_a_mode: {a_note.get('mode')}",
         f"- scientist_a_llm_backend: {a_note.get('llm_backend', '')}",
@@ -2586,6 +2597,8 @@ def main() -> int:
                         "Reject if normalized_total_violation does not improve against current best evidence.",
                     ],
                 }
+            a_proposed_idx = idx
+            a_proposed_task = dict(search_tasks[a_proposed_idx])
             idx, probe_gate_note = apply_probe_reference_gate(
                 args,
                 search_tasks,
@@ -2605,9 +2618,16 @@ def main() -> int:
                 if gate_reason:
                     priority_updates.append(gate_reason)
                     a_note["priority_updates"] = normalize_text_list(priority_updates, max_items=10)
-            scientist_a_log.append({"task": task, "decision": a_note})
 
             effective_task = effective_search_task(args, task)
+            scientist_a_log.append(
+                {
+                    "task": task,
+                    "proposed_task": a_proposed_task,
+                    "effective_task_after_policy": effective_task,
+                    "decision": a_note,
+                }
+            )
             best_so_far = rank_any_results(search_results)[0] if search_results else None
             try:
                 b_note = scientist_b_review(
@@ -2631,7 +2651,14 @@ def main() -> int:
                     "reason": f"Scientist_B exception fallback: {type(exc).__name__}: {exc}",
                     **deterministic_review(task, best_so_far),
                 }
-            scientist_b_log.append({"task": task, "decision": b_note})
+            scientist_b_log.append(
+                {
+                    "task": task,
+                    "reviewed_task": task,
+                    "effective_task_after_policy": effective_task,
+                    "decision": b_note,
+                }
+            )
             b_approved = str(b_note.get("decision", "approve")).lower() == "approve"
             if b_approved:
                 consecutive_rejects = 0
@@ -2650,7 +2677,17 @@ def main() -> int:
             )
             executive_log.append({"task": task, "decision": executive_note})
             current_priorities = merge_priority_board(current_priorities, a_note, b_note, executive_note)
-            append_iteration_research(research_path, search_iteration, task, a_note, b_note, executive_note)
+            append_iteration_research(
+                research_path,
+                search_iteration,
+                task,
+                a_note,
+                b_note,
+                scientist_a_proposed_task=a_proposed_task,
+                effective_task_after_policy=effective_task,
+                scientist_b_reviewed_task=task,
+                executive_note=executive_note,
+            )
 
             if not b_approved:
                 if str(executive_note.get("decision", "")).lower() != "override_execute":
