@@ -90,6 +90,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=int(os.environ.get("SMB_EXECUTIVE_TOP_K_LOCK", "5")),
     )
     parser.add_argument(
+        "--single-scientist-mode",
+        type=int,
+        default=int(os.environ.get("SMB_SINGLE_SCIENTIST_MODE", "0")),
+    )
+    parser.add_argument(
         "--min-probe-reference-runs",
         type=int,
         default=int(os.environ.get("SMB_MIN_PROBE_REFERENCE_RUNS", "3")),
@@ -1296,6 +1301,7 @@ def start_research_log(
         f"- exploratory_targets: purity={getattr(args, 'purity_min', '')}, recovery_ga={getattr(args, 'recovery_ga_min', '')}, recovery_ma={getattr(args, 'recovery_ma_min', '')}",
         f"- project_objective_targets: purity={getattr(args, 'project_purity_min', '')}, recovery_ga={getattr(args, 'project_recovery_ga_min', '')}, recovery_ma={getattr(args, 'project_recovery_ma_min', '')}",
         f"- executive_controller: enabled={bool(getattr(args, 'executive_controller_enabled', False))}, trigger_rejects={getattr(args, 'executive_trigger_rejects', '')}, force_after={getattr(args, 'executive_force_after_rejects', '')}, top_k_lock={getattr(args, 'executive_top_k_lock', '')}",
+        f"- single_scientist_mode: {bool(int(getattr(args, 'single_scientist_mode', 0)))}",
         f"- sqlite_db: {args.sqlite_db}",
         "",
         "### Codebase Context Snapshot",
@@ -1934,6 +1940,20 @@ def deterministic_review(candidate: Dict[str, object], best_result: Optional[Dic
         "risk_flags": ["Potential local infeasibility despite bounded flows."],
         "required_checks": ["Confirm effective post-bounds flow vector and solver termination condition."],
     }
+
+
+def single_scientist_policy_review(candidate: Dict[str, object], best_result: Optional[Dict[str, object]]) -> Dict[str, object]:
+    review = deterministic_review(candidate, best_result)
+    review = dict(review)
+    review["mode"] = "single_scientist_policy"
+    review["reason"] = (
+        "Scientist_B bypassed by single-scientist mode. "
+        + str(review.get("reason", "")).strip()
+    ).strip()
+    updates = normalize_text_list(review.get("priority_updates"), max_items=8)
+    updates.append("Single-scientist mode active: using deterministic policy gate instead of LLM review.")
+    review["priority_updates"] = normalize_text_list(updates, max_items=8)
+    return review
 
 
 def rank_any_results(results: List[Dict[str, object]]) -> List[Dict[str, object]]:
@@ -2629,28 +2649,31 @@ def main() -> int:
                 }
             )
             best_so_far = rank_any_results(search_results)[0] if search_results else None
-            try:
-                b_note = scientist_b_review(
-                    client,
-                    task,
-                    effective_task,
-                    best_so_far,
-                    args,
-                    code_context_excerpt,
-                    compute_context_excerpt,
-                    constraint_context_excerpt,
-                    nc_strategy_excerpt,
-                    research_excerpt,
-                    current_priorities,
-                    sqlite_excerpt,
-                    search_iteration,
-                )
-            except Exception as exc:
-                b_note = {
-                    "mode": "deterministic_error",
-                    "reason": f"Scientist_B exception fallback: {type(exc).__name__}: {exc}",
-                    **deterministic_review(task, best_so_far),
-                }
+            if bool(int(getattr(args, "single_scientist_mode", 0))):
+                b_note = single_scientist_policy_review(task, best_so_far)
+            else:
+                try:
+                    b_note = scientist_b_review(
+                        client,
+                        task,
+                        effective_task,
+                        best_so_far,
+                        args,
+                        code_context_excerpt,
+                        compute_context_excerpt,
+                        constraint_context_excerpt,
+                        nc_strategy_excerpt,
+                        research_excerpt,
+                        current_priorities,
+                        sqlite_excerpt,
+                        search_iteration,
+                    )
+                except Exception as exc:
+                    b_note = {
+                        "mode": "deterministic_error",
+                        "reason": f"Scientist_B exception fallback: {type(exc).__name__}: {exc}",
+                        **deterministic_review(task, best_so_far),
+                    }
             scientist_b_log.append(
                 {
                     "task": task,
@@ -2828,7 +2851,11 @@ def main() -> int:
         payload = {
             "status": "ok",
             "run_name": args.run_name,
-            "mode": "llm-assisted" if (client.enabled or client.fallback_enabled) else "deterministic-fallback",
+            "mode": (
+                "single-scientist"
+                if bool(int(args.single_scientist_mode))
+                else ("llm-assisted" if (client.enabled or client.fallback_enabled) else "deterministic-fallback")
+            ),
             "llm": {
                 "primary_enabled": client.enabled,
                 "primary_base_url": args.llm_base_url,
@@ -2838,6 +2865,7 @@ def main() -> int:
                 "fallback_model": args.fallback_llm_model if client.fallback_enabled else "",
                 "last_backend_used": client.last_backend,
             },
+            "single_scientist_mode": bool(int(args.single_scientist_mode)),
             "executive_controller": {
                 "enabled": bool(args.executive_controller_enabled),
                 "trigger_rejects": int(args.executive_trigger_rejects),

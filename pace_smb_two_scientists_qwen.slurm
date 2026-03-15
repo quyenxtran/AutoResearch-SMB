@@ -196,6 +196,7 @@ export SMB_BENCHMARK_HOURS="${SMB_BENCHMARK_HOURS:-12.0}"
 export SMB_SEARCH_BUDGET_HOURS="${SMB_SEARCH_BUDGET_HOURS:-10.0}"
 export SMB_VALIDATION_BUDGET_HOURS="${SMB_VALIDATION_BUDGET_HOURS:-2.0}"
 export SMB_MIN_PROBE_REFERENCE_RUNS="${SMB_MIN_PROBE_REFERENCE_RUNS:-3}"
+export SMB_SINGLE_SCIENTIST_MODE="${SMB_SINGLE_SCIENTIST_MODE:-1}"
 export SMB_PROBE_LOW_FIDELITY_ENABLED="${SMB_PROBE_LOW_FIDELITY_ENABLED:-1}"
 export SMB_PROBE_NFEX="${SMB_PROBE_NFEX:-5}"
 export SMB_PROBE_NFET="${SMB_PROBE_NFET:-2}"
@@ -533,6 +534,7 @@ cat > "${ARTIFACT_DIR}/compute_manifest.${SLURM_JOB_ID:-local}.md" <<EOF
 - search_budget_hours: ${SMB_SEARCH_BUDGET_HOURS}
 - validation_budget_hours: ${SMB_VALIDATION_BUDGET_HOURS}
 - min_probe_reference_runs: ${SMB_MIN_PROBE_REFERENCE_RUNS}
+- single_scientist_mode: ${SMB_SINGLE_SCIENTIST_MODE}
 - probe_low_fidelity_enabled: ${SMB_PROBE_LOW_FIDELITY_ENABLED}
 - probe_fidelity_nfex: ${SMB_PROBE_NFEX}
 - probe_fidelity_nfet: ${SMB_PROBE_NFET}
@@ -589,6 +591,7 @@ echo "Compute summary: ${SMB_COMPUTE_SUMMARY}"
 echo "Force MUMPS only: ${SMB_FORCE_MUMPS_ONLY}"
 echo "Solver selection: solver_name=${SMB_SOLVER_NAME}, linear_solver=${SMB_LINEAR_SOLVER}"
 echo "Agent budget: benchmark=${SMB_BENCHMARK_HOURS}h search=${SMB_SEARCH_BUDGET_HOURS}h validation=${SMB_VALIDATION_BUDGET_HOURS}h min_probe_reference_runs=${SMB_MIN_PROBE_REFERENCE_RUNS}"
+echo "Single-scientist mode: ${SMB_SINGLE_SCIENTIST_MODE}"
 echo "Probe low-fidelity policy: enabled=${SMB_PROBE_LOW_FIDELITY_ENABLED} nfex=${SMB_PROBE_NFEX} nfet=${SMB_PROBE_NFET} ncp=${SMB_PROBE_NCP}"
 echo "Executive live monitor: enabled=${SMB_EXECUTIVE_LIVE_MONITOR} poll_s=${SMB_EXECUTIVE_MONITOR_POLL_SECONDS} window_iters=${SMB_EXECUTIVE_MONITOR_WINDOW_ITERS} stall_eps=${SMB_EXECUTIVE_MONITOR_STALL_EPS}"
 echo "Executive watchdog: enabled=${SMB_EXECUTIVE_WATCHDOG_ENABLED} min_iters=${SMB_EXECUTIVE_WATCHDOG_MIN_ITERS} stall_windows=${SMB_EXECUTIVE_WATCHDOG_STALL_WINDOWS} max_inf_du=${SMB_EXECUTIVE_WATCHDOG_MAX_INF_DU} max_mumps_realloc=${SMB_EXECUTIVE_WATCHDOG_MAX_MUMPS_REALLOC}"
