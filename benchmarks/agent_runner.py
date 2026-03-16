@@ -1190,45 +1190,58 @@ def initial_priority_plan(
     constraint_context_excerpt: str,
 ) -> Dict[str, object]:
     default_plan = default_initial_priority_plan(args)
-    prompt = textwrap.dedent(
-        f"""
-        You are generating the initial research plan for a two-scientist SMB campaign.
-        Objective context:
-        {objectives_excerpt}
+    prompt_warning = ""
+    try:
+        prompt = textwrap.dedent(
+            f"""
+            You are generating the initial research plan for a two-scientist SMB campaign.
+            Objective context:
+            {objectives_excerpt}
 
-        Scientist operating rules:
-        {soul_excerpt}
+            Scientist operating rules:
+            {soul_excerpt}
 
-        Codebase context:
-        {codebase_excerpt}
+            Codebase context:
+            {codebase_excerpt}
 
-        Runtime compute context:
-        {compute_context_excerpt}
+            Runtime compute context:
+            {compute_context_excerpt}
 
-        Simulation objective/constraint context:
-        {constraint_context_excerpt}
+            Simulation objective/constraint context:
+            {constraint_context_excerpt}
 
-        Existing SQLite run history:
-        {sqlite_excerpt}
+            Existing SQLite run history:
+            {sqlite_excerpt}
 
-        NC strategy board (screen all layouts before deep sweeps):
-        {nc_strategy_excerpt}
+            NC strategy board (screen all layouts before deep sweeps):
+            {nc_strategy_excerpt}
 
-        Requirements:
-        - provide concrete strategy for screening all NC layouts in this library before deep seed exploration
-        - reference compute budget explicitly
-        - reference constraints explicitly
+            Requirements:
+            - provide concrete strategy for screening all NC layouts in this library before deep seed exploration
+            - reference compute budget explicitly
+            - reference constraints explicitly
 
-        Respond with JSON only:
-        {{
-          "priorities": ["..."],
-          "proposed_simulations": ["..."],
-          "risks": ["..."],
-          "nc_screening_strategy": ["..."],
-          "reason": "..."
-        }}
-        """
-    ).strip()
+            Respond with JSON only:
+            {{
+              "priorities": ["..."],
+              "proposed_simulations": ["..."],
+              "risks": ["..."],
+              "nc_screening_strategy": ["..."],
+              "reason": "..."
+            }}
+            """
+        ).strip()
+    except Exception as exc:
+        prompt_warning = f"Prompt build warning: {type(exc).__name__}: {exc}"
+        prompt = (
+            "You are generating an initial SMB research plan. Return JSON only with keys "
+            "priorities, proposed_simulations, risks, nc_screening_strategy, reason.\n\n"
+            f"Objective context:\n{objectives_excerpt}\n\n"
+            f"Runtime compute context:\n{compute_context_excerpt}\n\n"
+            f"Constraint context:\n{constraint_context_excerpt}\n\n"
+            f"NC strategy board:\n{nc_strategy_excerpt}\n\n"
+            "Requirements: strategy must screen all NC layouts, reference compute budget, and explicit constraints."
+        )
     raw = client.chat(
         "You are a principal SMB process scientist. Return JSON only.",
         prompt,
@@ -1258,6 +1271,7 @@ def initial_priority_plan(
         "risks": risks or default_plan["risks"],
         "nc_screening_strategy": nc_screening_strategy or default_plan["nc_screening_strategy"],
         "reason": str(data.get("reason", "")),
+        "prompt_warning": prompt_warning,
         "raw": raw,
     }
 
@@ -2126,74 +2140,85 @@ def scientist_a_pick(
         return default_index, {"mode": "deterministic", "reason": "No remaining tasks."}
 
     best = rank_any_results(results)[0] if results else None
-    prompt = textwrap.dedent(
-        f"""
-        You are Scientist_A for an SMB optimization benchmark.
-        Think aggressively and evidence-first. Do not give generic plans.
-        Every proposal must reference concrete signals from at least one of:
-        SQLite history, research log tail, compute context, or constraint context.
-        Before choosing a new experiment, you must compare it against previous results (at minimum: current best and one recent failed run).
-        If evidence is weak, propose a diagnostic run and state why.
+    prompt_warning = ""
+    try:
+        prompt = textwrap.dedent(
+            f"""
+            You are Scientist_A for an SMB optimization benchmark.
+            Think aggressively and evidence-first. Do not give generic plans.
+            Every proposal must reference concrete signals from at least one of:
+            SQLite history, research log tail, compute context, or constraint context.
+            Before choosing a new experiment, you must compare it against previous results (at minimum: current best and one recent failed run).
+            If evidence is weak, propose a diagnostic run and state why.
 
-        Objective summary:
-        {objectives_excerpt}
+            Objective summary:
+            {objectives_excerpt}
 
-        Scientist rules summary:
-        {soul_excerpt}
+            Scientist rules summary:
+            {soul_excerpt}
 
-        Codebase context summary:
-        {codebase_context_excerpt}
+            Codebase context summary:
+            {codebase_context_excerpt}
 
-        Runtime compute context:
-        {compute_context_excerpt}
+            Runtime compute context:
+            {compute_context_excerpt}
 
-        Simulation objective/constraint context:
-        {constraint_context_excerpt}
+            Simulation objective/constraint context:
+            {constraint_context_excerpt}
 
-        Current research log tail:
-        {research_excerpt}
+            Current research log tail:
+            {research_excerpt}
 
-        NC strategy board (all layouts in current library):
-        {nc_strategy_excerpt}
+            NC strategy board (all layouts in current library):
+            {nc_strategy_excerpt}
 
-        Current priority board:
-        {json.dumps(current_priorities, indent=2)}
+            Current priority board:
+            {json.dumps(current_priorities, indent=2)}
 
-        Historical simulation context (queried from SQLite):
-        {sqlite_context_excerpt}
+            Historical simulation context (queried from SQLite):
+            {sqlite_context_excerpt}
 
-        Counted benchmark budget is {args.benchmark_hours:.1f} SMB hours with {args.search_hours:.1f} search hours and {args.validation_hours:.1f} validation hours.
-        Search wall-hours used so far: {budget_used:.4f}
-        Hard policy: complete at least {int(getattr(args, "min_probe_reference_runs", 0))} reference-seed probe runs before proposing non-reference seed optimization.
-        Hard policy: final high-fidelity optimization is allowed only after low-fidelity reference and low-fidelity non-reference optimization evidence exist on the same NC.
+            Counted benchmark budget is {args.benchmark_hours:.1f} SMB hours with {args.search_hours:.1f} search hours and {args.validation_hours:.1f} validation hours.
+            Search wall-hours used so far: {budget_used:.4f}
+            Hard policy: complete at least {int(getattr(args, "min_probe_reference_runs", 0))} reference-seed probe runs before proposing non-reference seed optimization.
+            Hard policy: final high-fidelity optimization is allowed only after low-fidelity reference and low-fidelity non-reference optimization evidence exist on the same NC.
 
-        Current best result:
-        {summarize_result(best) if best else "None yet."}
+            Current best result:
+            {summarize_result(best) if best else "None yet."}
 
-        Required rigor:
-        - compare candidate NC against at least two alternative NC layouts from the strategy board
-        - compare candidate against previous result evidence (current best + recent failure when available)
-        - include quantitative metric evidence in comparisons (at least one of: productivity, purity, recovery, violation, feasible/J)
-        - include explicit compute/budget impact and stopping/failure criteria
+            Required rigor:
+            - compare candidate NC against at least two alternative NC layouts from the strategy board
+            - compare candidate against previous result evidence (current best + recent failure when available)
+            - include quantitative metric evidence in comparisons (at least one of: productivity, purity, recovery, violation, feasible/J)
+            - include explicit compute/budget impact and stopping/failure criteria
 
-        Remaining candidate shortlist:
-        {json.dumps(shortlist, indent=2)}
+            Remaining candidate shortlist:
+            {json.dumps(shortlist, indent=2)}
 
-        Respond with JSON only:
-        {{
-          "candidate_index": <0-based index into shortlist>,
-          "reason": "<brief reason>",
-          "evidence": ["<specific evidence item>", "..."],
-          "comparison_to_previous": ["<explicit comparison to named prior run with metric/termination evidence>", "..."],
-          "nc_competitor_comparison": ["<candidate nc vs two alternatives with rationale>", "..."],
-          "diagnostic_hypothesis": "<what this run is testing>",
-          "failure_criteria": ["<what would make this a bad proposal>", "..."],
-          "fidelity": "medium",
-          "priority_updates": ["..."],
-          "proposed_followups": ["..."]
-        }}
-        """
-    ).strip()
+            Respond with JSON only:
+            {{
+              "candidate_index": <0-based index into shortlist>,
+              "reason": "<brief reason>",
+              "evidence": ["<specific evidence item>", "..."],
+              "comparison_to_previous": ["<explicit comparison to named prior run with metric/termination evidence>", "..."],
+              "nc_competitor_comparison": ["<candidate nc vs two alternatives with rationale>", "..."],
+              "diagnostic_hypothesis": "<what this run is testing>",
+              "failure_criteria": ["<what would make this a bad proposal>", "..."],
+              "fidelity": "medium",
+              "priority_updates": ["..."],
+              "proposed_followups": ["..."]
+            }}
+            """
+        ).strip()
+    except Exception as exc:
+        prompt_warning = f"Prompt build warning: {type(exc).__name__}: {exc}"
+        prompt = (
+            "You are Scientist_A for SMB optimization. Return JSON only.\n\n"
+            f"Current best result: {summarize_result(best) if best else 'None yet.'}\n"
+            f"Remaining candidate shortlist:\n{json.dumps(shortlist, indent=2)}\n\n"
+            "Respond with keys: candidate_index, reason, evidence, comparison_to_previous, "
+            "nc_competitor_comparison, diagnostic_hypothesis, failure_criteria, fidelity, priority_updates, proposed_followups."
+        )
     raw = client.chat(
         "You are an aggressive optimization scientist. Return JSON only and ground claims in evidence.",
         prompt,
@@ -2262,7 +2287,13 @@ def scientist_a_pick(
             data["diagnostic_hypothesis"] = str(data.get("diagnostic_hypothesis", "")).strip()
             chosen = shortlist[idx]
             absolute_idx = candidate_tasks.index(chosen)
-            return absolute_idx, {"mode": "llm", "llm_backend": client.last_backend, "raw": raw, **data}
+            return absolute_idx, {
+                "mode": "llm",
+                "llm_backend": client.last_backend,
+                "prompt_warning": prompt_warning,
+                "raw": raw,
+                **data,
+            }
     return default_index, {
         "mode": "deterministic",
         "reason": "Falling back to deterministic candidate choice.",
@@ -2283,6 +2314,7 @@ def scientist_a_pick(
         "priority_updates": [
             "Use deterministic task order when model output is unavailable; collect more observations before strategy changes."
         ],
+        "prompt_warning": prompt_warning,
     }
 
 
@@ -2302,58 +2334,69 @@ def scientist_b_review(
     iteration: int,
 ) -> Dict[str, object]:
     default = deterministic_review(task, best_result)
-    prompt = textwrap.dedent(
-        f"""
-        You are Scientist_B. Review this proposed SMB medium-fidelity optimization attempt.
-        Be adversarial and skeptical by default.
-        Reject if rationale is generic, evidence is weak, or compute/constraint tradeoffs are ignored.
-        You must explicitly compare the proposal against previous results before deciding.
-        If you approve, still provide the strongest counterarguments and explicit risk checks.
+    prompt_warning = ""
+    try:
+        prompt = textwrap.dedent(
+            f"""
+            You are Scientist_B. Review this proposed SMB medium-fidelity optimization attempt.
+            Be adversarial and skeptical by default.
+            Reject if rationale is generic, evidence is weak, or compute/constraint tradeoffs are ignored.
+            You must explicitly compare the proposal against previous results before deciding.
+            If you approve, still provide the strongest counterarguments and explicit risk checks.
 
-        Proposed task:
-        {json.dumps(task, indent=2)}
+            Proposed task:
+            {json.dumps(task, indent=2)}
 
-        Effective bounded candidate that will actually be executed:
-        {json.dumps(effective_task, indent=2)}
+            Effective bounded candidate that will actually be executed:
+            {json.dumps(effective_task, indent=2)}
 
-        Current best result:
-        {summarize_result(best_result) if best_result else "None yet."}
+            Current best result:
+            {summarize_result(best_result) if best_result else "None yet."}
 
-        Codebase context summary:
-        {codebase_context_excerpt}
+            Codebase context summary:
+            {codebase_context_excerpt}
 
-        Runtime compute context:
-        {compute_context_excerpt}
+            Runtime compute context:
+            {compute_context_excerpt}
 
-        Simulation objective/constraint context:
-        {constraint_context_excerpt}
+            Simulation objective/constraint context:
+            {constraint_context_excerpt}
 
-        NC strategy board (all layouts in current library):
-        {nc_strategy_excerpt}
+            NC strategy board (all layouts in current library):
+            {nc_strategy_excerpt}
 
-        Current research log tail:
-        {research_excerpt}
+            Current research log tail:
+            {research_excerpt}
 
-        Current priority board:
-        {json.dumps(current_priorities, indent=2)}
+            Current priority board:
+            {json.dumps(current_priorities, indent=2)}
 
-        Historical simulation context (queried from SQLite):
-        {sqlite_context_excerpt}
+            Historical simulation context (queried from SQLite):
+            {sqlite_context_excerpt}
 
-        Respond with JSON only:
-        {{
-          "decision": "approve" or "reject",
-          "reason": "<brief reason>",
-          "comparison_assessment": ["<explicit comparison vs prior run(s) with quantitative metric/termination evidence>", "..."],
-          "nc_strategy_assessment": ["<candidate nc vs alternatives and why>", "..."],
-          "compute_assessment": "<budget/time parallelism assessment>",
-          "counterarguments": ["<strongest objection 1>", "..."],
-          "required_checks": ["<check before trusting result>", "..."],
-          "priority_updates": ["..."],
-          "risk_flags": ["..."]
-        }}
-        """
-    ).strip()
+            Respond with JSON only:
+            {{
+              "decision": "approve" or "reject",
+              "reason": "<brief reason>",
+              "comparison_assessment": ["<explicit comparison vs prior run(s) with quantitative metric/termination evidence>", "..."],
+              "nc_strategy_assessment": ["<candidate nc vs alternatives and why>", "..."],
+              "compute_assessment": "<budget/time parallelism assessment>",
+              "counterarguments": ["<strongest objection 1>", "..."],
+              "required_checks": ["<check before trusting result>", "..."],
+              "priority_updates": ["..."],
+              "risk_flags": ["..."]
+            }}
+            """
+        ).strip()
+    except Exception as exc:
+        prompt_warning = f"Prompt build warning: {type(exc).__name__}: {exc}"
+        prompt = (
+            "You are Scientist_B reviewer. Return JSON only with keys decision, reason, comparison_assessment, "
+            "nc_strategy_assessment, compute_assessment, counterarguments, required_checks, priority_updates, risk_flags.\n\n"
+            f"Proposed task:\n{json.dumps(task, indent=2)}\n\n"
+            f"Effective candidate:\n{json.dumps(effective_task, indent=2)}\n\n"
+            f"Current best result: {summarize_result(best_result) if best_result else 'None yet.'}"
+        )
     raw = client.chat(
         "You are a hard-nosed numerical reviewer. Return JSON only and challenge weak proposals.",
         prompt,
@@ -2446,7 +2489,13 @@ def scientist_b_review(
         data["comparison_assessment"] = normalize_text_list(data.get("comparison_assessment"), max_items=8)
         data["nc_strategy_assessment"] = normalize_text_list(data.get("nc_strategy_assessment"), max_items=8)
         data["compute_assessment"] = str(data.get("compute_assessment", "")).strip()
-        return {"mode": "llm", "llm_backend": client.last_backend, "raw": raw, **data}
+        return {
+            "mode": "llm",
+            "llm_backend": client.last_backend,
+            "prompt_warning": prompt_warning,
+            "raw": raw,
+            **data,
+        }
     return {"mode": "deterministic", **default}
 
 
@@ -2757,6 +2806,7 @@ def main() -> int:
                 a_note = {
                     "mode": "deterministic_error",
                     "reason": f"Scientist_A exception fallback: {type(exc).__name__}: {exc}",
+                    "traceback": traceback.format_exc(),
                     "priority_updates": [
                         "Scientist_A call failed; fallback to deterministic first-untried candidate to keep run alive."
                     ],
@@ -2830,6 +2880,7 @@ def main() -> int:
                     b_note = {
                         "mode": "deterministic_error",
                         "reason": f"Scientist_B exception fallback: {type(exc).__name__}: {exc}",
+                        "traceback": traceback.format_exc(),
                         **deterministic_review(task, best_so_far),
                     }
             scientist_b_log.append(
