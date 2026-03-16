@@ -119,6 +119,26 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=int(os.environ.get("SMB_PROBE_NCP", "1")),
     )
+    parser.add_argument(
+        "--finalization-hard-gate-enabled",
+        type=int,
+        default=int(os.environ.get("SMB_FINALIZATION_HARD_GATE_ENABLED", "1")),
+    )
+    parser.add_argument(
+        "--finalization-low-fidelity-nfex",
+        type=int,
+        default=int(os.environ.get("SMB_FINALIZATION_LOW_FIDELITY_NFEX", os.environ.get("SMB_PROBE_NFEX", "5"))),
+    )
+    parser.add_argument(
+        "--finalization-low-fidelity-nfet",
+        type=int,
+        default=int(os.environ.get("SMB_FINALIZATION_LOW_FIDELITY_NFET", os.environ.get("SMB_PROBE_NFET", "2"))),
+    )
+    parser.add_argument(
+        "--finalization-low-fidelity-ncp",
+        type=int,
+        default=int(os.environ.get("SMB_FINALIZATION_LOW_FIDELITY_NCP", os.environ.get("SMB_PROBE_NCP", "1"))),
+    )
     parser.add_argument("--llm-timeout-seconds", type=float, default=float(os.environ.get("SMB_LLM_TIMEOUT_SECONDS", "300")))
     parser.add_argument("--llm-max-retries", type=int, default=int(os.environ.get("SMB_LLM_MAX_RETRIES", "2")))
     parser.add_argument(
@@ -680,9 +700,9 @@ def configure_stage_args(base: argparse.Namespace, args: argparse.Namespace) -> 
     stage_args.tee = args.tee
     stage_args.nc_library = args.nc_library
     stage_args.seed_library = args.seed_library
-    stage_args.max_iter = 5000
-    stage_args.tol = 1e-6
-    stage_args.acceptable_tol = 1e-5
+    stage_args.max_iter = int(env_or_default("SMB_IPOPT_MAX_ITER", "1000"))
+    stage_args.tol = float(env_or_default("SMB_IPOPT_TOL", "1e-5"))
+    stage_args.acceptable_tol = float(env_or_default("SMB_IPOPT_ACCEPTABLE_TOL", "1e-4"))
     stage_args.nfex = int(env_or_default("SMB_NFEX", str(stage_args.nfex)))
     stage_args.nfet = int(env_or_default("SMB_NFET", str(stage_args.nfet)))
     stage_args.ncp = int(env_or_default("SMB_NCP", str(stage_args.ncp)))
@@ -1294,6 +1314,9 @@ def start_research_log(
         f"- min_probe_reference_runs: {getattr(args, 'min_probe_reference_runs', '')}",
         f"- probe_low_fidelity_enabled: {bool(int(getattr(args, 'probe_low_fidelity_enabled', 0)))}",
         f"- probe_fidelity: nfex={getattr(args, 'probe_nfex', '')}, nfet={getattr(args, 'probe_nfet', '')}, ncp={getattr(args, 'probe_ncp', '')}",
+        f"- finalization_hard_gate_enabled: {bool(int(getattr(args, 'finalization_hard_gate_enabled', 0)))}",
+        f"- finalization_low_fidelity_requirements: nfex<={getattr(args, 'finalization_low_fidelity_nfex', '')}, nfet<={getattr(args, 'finalization_low_fidelity_nfet', '')}, ncp<={getattr(args, 'finalization_low_fidelity_ncp', '')}",
+        f"- ipopt_defaults: max_iter={int(env_or_default('SMB_IPOPT_MAX_ITER', '1000'))}, tol={float(env_or_default('SMB_IPOPT_TOL', '1e-5'))}, acceptable_tol={float(env_or_default('SMB_IPOPT_ACCEPTABLE_TOL', '1e-4'))}",
         f"- solver_name: {args.solver_name}",
         f"- linear_solver: {args.linear_solver}",
         f"- nc_library: {args.nc_library}",
@@ -1693,6 +1716,77 @@ def is_reference_seed_name(seed_name: object) -> bool:
     return str(seed_name or "").strip().lower() == "reference"
 
 
+def low_fidelity_limits(args: argparse.Namespace) -> Dict[str, int]:
+    return {
+        "nfex": max(1, int(getattr(args, "finalization_low_fidelity_nfex", getattr(args, "probe_nfex", 5)))),
+        "nfet": max(1, int(getattr(args, "finalization_low_fidelity_nfet", getattr(args, "probe_nfet", 2)))),
+        "ncp": max(1, int(getattr(args, "finalization_low_fidelity_ncp", getattr(args, "probe_ncp", 1)))),
+    }
+
+
+def fidelity_triplet(result: Dict[str, object]) -> Optional[Tuple[int, int, int]]:
+    fidelity = result.get("fidelity")
+    if not isinstance(fidelity, dict):
+        return None
+    try:
+        return int(fidelity.get("nfex", 0)), int(fidelity.get("nfet", 0)), int(fidelity.get("ncp", 0))
+    except Exception:
+        return None
+
+
+def is_low_fidelity_result(result: Dict[str, object], args: argparse.Namespace) -> bool:
+    triplet = fidelity_triplet(result)
+    if triplet is None:
+        return False
+    limits = low_fidelity_limits(args)
+    return triplet[0] <= limits["nfex"] and triplet[1] <= limits["nfet"] and triplet[2] <= limits["ncp"]
+
+
+def has_metric_evidence(result: Dict[str, object]) -> bool:
+    status = str(result.get("status", "")).strip().lower()
+    if status in {"ok", "solver_error"}:
+        return True
+    return (
+        safe_result_metric(result, "purity_ex_meoh_free") is not None
+        or safe_result_metric(result, "recovery_ex_GA") is not None
+        or safe_result_metric(result, "productivity_ex_ga_ma") is not None
+    )
+
+
+def has_low_fidelity_reference_evidence_for_nc(
+    args: argparse.Namespace,
+    results: List[Dict[str, object]],
+    nc: Tuple[int, ...],
+) -> bool:
+    for item in results:
+        if tuple(item.get("nc", [])) != nc:
+            continue
+        if not is_reference_seed_name(item.get("seed_name")):
+            continue
+        if not is_low_fidelity_result(item, args):
+            continue
+        if has_metric_evidence(item):
+            return True
+    return False
+
+
+def has_low_fidelity_optimization_evidence_for_nc(
+    args: argparse.Namespace,
+    results: List[Dict[str, object]],
+    nc: Tuple[int, ...],
+) -> bool:
+    for item in results:
+        if tuple(item.get("nc", [])) != nc:
+            continue
+        if is_reference_seed_name(item.get("seed_name")):
+            continue
+        if not is_low_fidelity_result(item, args):
+            continue
+        if has_metric_evidence(item):
+            return True
+    return False
+
+
 def reference_probe_runs_completed(results: List[Dict[str, object]]) -> int:
     return sum(1 for item in results if is_reference_seed_name(item.get("seed_name")))
 
@@ -1784,6 +1878,24 @@ def search_execution_policy(
         "low_fidelity_enabled": low_fidelity_enabled,
     }
     if not probe_phase_active:
+        if not bool(int(getattr(args, "finalization_hard_gate_enabled", 1))):
+            return policy
+        if is_reference_seed_name(task.get("seed_name")):
+            return policy
+        nc = tuple(task.get("nc", []))
+        if has_low_fidelity_optimization_evidence_for_nc(args, search_results, nc):
+            return policy
+        limits = low_fidelity_limits(args)
+        policy["fidelity_override"] = {
+            "nfex": limits["nfex"],
+            "nfet": limits["nfet"],
+            "ncp": limits["ncp"],
+        }
+        policy["reason"] = (
+            "Finalization hard gate precheck: forcing first non-reference optimization for this NC "
+            f"to low-fidelity (nfex={limits['nfex']}, nfet={limits['nfet']}, ncp={limits['ncp']}) "
+            "before expensive final optimization is allowed."
+        )
         return policy
     if not low_fidelity_enabled:
         policy["reason"] = "Probe phase active, but low-fidelity override is disabled."
@@ -2053,6 +2165,7 @@ def scientist_a_pick(
         Counted benchmark budget is {args.benchmark_hours:.1f} SMB hours with {args.search_hours:.1f} search hours and {args.validation_hours:.1f} validation hours.
         Search wall-hours used so far: {budget_used:.4f}
         Hard policy: complete at least {int(getattr(args, "min_probe_reference_runs", 0))} reference-seed probe runs before proposing non-reference seed optimization.
+        Hard policy: final high-fidelity optimization is allowed only after low-fidelity reference and low-fidelity non-reference optimization evidence exist on the same NC.
 
         Current best result:
         {summarize_result(best) if best else "None yet."}
@@ -2407,14 +2520,59 @@ def effective_search_task(args: argparse.Namespace, task: Dict[str, object]) -> 
     }
 
 
-def build_validation_candidates(results: List[Dict[str, object]], max_items: int) -> List[Dict[str, object]]:
+def build_validation_candidates(
+    args: argparse.Namespace,
+    results: List[Dict[str, object]],
+    max_items: int,
+) -> Tuple[List[Dict[str, object]], List[str]]:
     ranked = rank_any_results(results)
     selected: List[Dict[str, object]] = []
+    gate_notes: List[str] = []
+    gate_seen: set[str] = set()
     seen: set[Tuple[Tuple[int, ...], float, float, float, float, float]] = set()
+    hard_gate_enabled = bool(int(getattr(args, "finalization_hard_gate_enabled", 1)))
     for item in ranked:
         flow = effective_flow(item)
         if flow is None:
             continue
+        if hard_gate_enabled:
+            nc = tuple(item.get("nc", []))
+            if is_reference_seed_name(item.get("seed_name")):
+                note = f"Skipped {item.get('run_name')}: finalization gate requires non-reference optimization candidate."
+                if note not in gate_seen:
+                    gate_seen.add(note)
+                    gate_notes.append(note)
+                continue
+            if not is_low_fidelity_result(item, args):
+                note = f"Skipped {item.get('run_name')}: candidate is not low-fidelity pre-final run."
+                if note not in gate_seen:
+                    gate_seen.add(note)
+                    gate_notes.append(note)
+                continue
+            if str(item.get("status", "")).lower() != "ok":
+                note = f"Skipped {item.get('run_name')}: candidate status is '{item.get('status')}', requires status 'ok' for finalization."
+                if note not in gate_seen:
+                    gate_seen.add(note)
+                    gate_notes.append(note)
+                continue
+            if not has_low_fidelity_reference_evidence_for_nc(args, results, nc):
+                note = (
+                    f"Skipped {item.get('run_name')}: missing low-fidelity reference evidence for nc={list(nc)} "
+                    "required before final optimization."
+                )
+                if note not in gate_seen:
+                    gate_seen.add(note)
+                    gate_notes.append(note)
+                continue
+            if not has_low_fidelity_optimization_evidence_for_nc(args, results, nc):
+                note = (
+                    f"Skipped {item.get('run_name')}: missing low-fidelity optimization evidence for nc={list(nc)} "
+                    "required before final optimization."
+                )
+                if note not in gate_seen:
+                    gate_seen.add(note)
+                    gate_notes.append(note)
+                continue
         key = (
             tuple(item["nc"]),
             flow["Ffeed"],
@@ -2429,7 +2587,7 @@ def build_validation_candidates(results: List[Dict[str, object]], max_items: int
         selected.append(item)
         if len(selected) >= max_items:
             break
-    return selected
+    return selected, gate_notes
 
 
 def execute_validation(args: argparse.Namespace, result: Dict[str, object], ordinal: int) -> Dict[str, object]:
@@ -2816,7 +2974,15 @@ def main() -> int:
             timing = result.get("timing") or {}
             search_hours_used += float(timing.get("wall_seconds", 0.0)) / 3600.0
 
-        validation_pool = build_validation_candidates(search_results, args.max_validations)
+        validation_pool, finalization_gate_notes = build_validation_candidates(args, search_results, args.max_validations)
+        if finalization_gate_notes:
+            append_research(
+                research_path,
+                "\n#### Finalization Hard-Gate Notes\n"
+                f"- timestamp_utc: {utc_now_text()}\n"
+                + "\n".join([f"- {line}" for line in finalization_gate_notes[:20]])
+                + "\n",
+            )
         for ordinal, candidate in enumerate(validation_pool, start=1):
             if validation_hours_used >= args.validation_hours:
                 break
@@ -2893,6 +3059,18 @@ def main() -> int:
                     "nfet": int(args.probe_nfet),
                     "ncp": int(args.probe_ncp),
                 },
+            },
+            "finalization_policy": {
+                "hard_gate_enabled": bool(int(args.finalization_hard_gate_enabled)),
+                "required_sequence": [
+                    "low_fidelity_reference_seed",
+                    "low_fidelity_non_reference_optimization",
+                    "final_high_fidelity_validation",
+                ],
+                "low_fidelity_limits": low_fidelity_limits(args),
+                "validation_pool_size": len(validation_pool),
+                "gate_notes_count": len(finalization_gate_notes),
+                "gate_notes": finalization_gate_notes[:20],
             },
             "llm_conversations": {
                 "path": str(conversation_artifact.resolve()),
