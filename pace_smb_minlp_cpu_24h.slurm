@@ -22,7 +22,12 @@
 
 set -euo pipefail
 
+# Prefer submission directory on Slurm because BASH_SOURCE can resolve to
+# /var/lib/slurm/slurmd/job*/ for copied scripts that do not include siblings.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${SLURM_SUBMIT_DIR:-}" && -f "${SLURM_SUBMIT_DIR}/pace_smb_stage_runner.slurm" ]]; then
+  SCRIPT_DIR="${SLURM_SUBMIT_DIR}"
+fi
 export REPO_ROOT="${SCRIPT_DIR}"
 
 SUITE_TAG="${SMB_SUITE_TAG:-cmp_$(date +%Y%m%d_%H%M%S)}"
