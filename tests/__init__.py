@@ -1,0 +1,1 @@
+# AutoResearch-SMB test suite

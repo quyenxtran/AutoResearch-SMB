@@ -1,0 +1,14 @@
+# Core Python dependencies for the SMB model and stage runners
+numpy
+matplotlib
+pyomo
+
+# Notebook execution
+jupyter
+nbconvert
+ipykernel
+
+# External solver executables required outside pip/conda Python package install:
+# - ipopt_sens or ipopt: required for the current SembaSMB NLP workflow
+# - bonmin or couenne: optional direct MINLP baselines if provisioned system-side
+# - HSL / MUMPS / Pardiso linear solvers: optional IPOPT backends if provisioned system-side

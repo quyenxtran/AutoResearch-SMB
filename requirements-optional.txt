@@ -1,0 +1,7 @@
+# Optional Python bindings for users who already have system IPOPT development
+# libraries installed and discoverable via pkg-config.
+#
+# This is NOT required for the current SembaSMB workflow, which uses the
+# external ipopt_sens/ipopt executable through Pyomo SolverFactory.
+
+cyipopt

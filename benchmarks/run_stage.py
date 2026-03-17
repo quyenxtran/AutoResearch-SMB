@@ -21,7 +21,7 @@ from pyomo.environ import value
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SMB_ROOT = REPO_ROOT / "SembaSMB"
+SMB_ROOT = REPO_ROOT / "src"
 if str(SMB_ROOT) not in sys.path:
     sys.path.insert(0, str(SMB_ROOT))
 

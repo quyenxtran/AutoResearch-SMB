@@ -180,9 +180,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--fallback-llm-api-key",
         default=os.environ.get("SMB_FALLBACK_LLM_API_KEY", os.environ.get("OPENAI_API_KEY", "")),
     )
-    parser.add_argument("--objectives-file", default=os.environ.get("SMB_OBJECTIVES_FILE", str(REPO_ROOT / "Objectives.md")))
-    parser.add_argument("--llm-soul-file", default=os.environ.get("SMB_LLM_SOUL_FILE", str(REPO_ROOT / "LLM_SOUL.md")))
-    parser.add_argument("--ipopt-resource-file", default=os.environ.get("SMB_IPOPT_RESOURCE_FILE", str(REPO_ROOT / "IPOPT_SOLVER_RESOURCES.md")))
+    parser.add_argument("--objectives-file", default=os.environ.get("SMB_OBJECTIVES_FILE", str(REPO_ROOT / "agents" / "Objectives.md")))
+    parser.add_argument("--llm-soul-file", default=os.environ.get("SMB_LLM_SOUL_FILE", str(REPO_ROOT / "agents" / "LLM_SOUL.md")))
+    parser.add_argument("--ipopt-resource-file", default=os.environ.get("SMB_IPOPT_RESOURCE_FILE", str(REPO_ROOT / "agents" / "IPOPT_SOLVER_RESOURCES.md")))
     return parser
 
 
