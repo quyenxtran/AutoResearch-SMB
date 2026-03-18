@@ -149,17 +149,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--objectives-max-chars",
         type=int,
-        default=int(os.environ.get("SMB_OBJECTIVES_MAX_CHARS", "10000")),
+        default=int(os.environ.get("SMB_OBJECTIVES_MAX_CHARS", "6000")),
     )
     parser.add_argument(
         "--llm-soul-max-chars",
         type=int,
-        default=int(os.environ.get("SMB_LLM_SOUL_MAX_CHARS", "5000")),
+        default=int(os.environ.get("SMB_LLM_SOUL_MAX_CHARS", "3500")),
+    )
+    parser.add_argument(
+        "--problem-definition-max-chars",
+        type=int,
+        default=int(os.environ.get("SMB_PROBLEM_DEFINITION_MAX_CHARS", "2500")),
+    )
+    parser.add_argument(
+        "--skills-max-chars",
+        type=int,
+        default=int(os.environ.get("SMB_SKILLS_MAX_CHARS", "2200")),
     )
     parser.add_argument(
         "--ipopt-resource-max-chars",
         type=int,
-        default=int(os.environ.get("SMB_IPOPT_RESOURCE_MAX_CHARS", "2500")),
+        default=int(os.environ.get("SMB_IPOPT_RESOURCE_MAX_CHARS", "1600")),
     )
     parser.add_argument("--tee", action="store_true", default=os.environ.get("SMB_AGENT_TEE", "0") == "1")
     parser.add_argument("--llm-enabled", action="store_true", default=os.environ.get("SMB_AGENT_LLM_ENABLED", "1") == "1")
@@ -182,6 +192,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--objectives-file", default=os.environ.get("SMB_OBJECTIVES_FILE", str(REPO_ROOT / "agents" / "Objectives.md")))
     parser.add_argument("--llm-soul-file", default=os.environ.get("SMB_LLM_SOUL_FILE", str(REPO_ROOT / "agents" / "LLM_SOUL.md")))
+    parser.add_argument(
+        "--problem-definition-file",
+        default=os.environ.get("SMB_PROBLEM_DEFINITION_FILE", str(REPO_ROOT / "agents" / "Problem_definition.md")),
+    )
+    parser.add_argument(
+        "--skills-file",
+        default=os.environ.get("SMB_SKILLS_FILE", str(REPO_ROOT / "agents" / "SKILLS.md")),
+    )
     parser.add_argument("--ipopt-resource-file", default=os.environ.get("SMB_IPOPT_RESOURCE_FILE", str(REPO_ROOT / "agents" / "IPOPT_SOLVER_RESOURCES.md")))
     return parser
 
@@ -1312,7 +1330,65 @@ def read_doc_excerpt(path: str, max_chars: int = 4000) -> str:
     p = Path(path)
     if not p.exists():
         return f"Missing file: {path}"
-    return p.read_text(encoding="utf-8")[:max_chars]
+    text = p.read_text(encoding="utf-8")
+    return compact_prompt_block(text, max_chars=max_chars, max_lines=200)
+
+
+def compact_prompt_block(text: str, max_chars: int = 2000, max_lines: int = 80) -> str:
+    """Compress context blocks for prompts while preserving high-signal constraints."""
+    if not text:
+        return ""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    out_lines: List[str] = []
+    seen: set[str] = set()
+    blank_pending = False
+    for raw in normalized.split("\n"):
+        line = " ".join(raw.strip().split())
+        if not line:
+            blank_pending = True
+            continue
+        key = line.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if blank_pending and out_lines and out_lines[-1] != "":
+            out_lines.append("")
+        blank_pending = False
+        out_lines.append(line)
+        if len(out_lines) >= max_lines:
+            break
+    compacted = "\n".join(out_lines).strip()
+    if len(compacted) <= max_chars:
+        return compacted
+    return compacted[: max_chars - 1].rstrip() + "…"
+
+
+def markdown_focused_excerpt(
+    path: str,
+    heading_keywords: Sequence[str],
+    max_chars: int,
+    max_lines: int = 120,
+) -> str:
+    p = Path(path)
+    if not p.exists():
+        return f"Missing file: {path}"
+    text = p.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    matches = list(re.finditer(r"^##\s+(.+)$", text, flags=re.MULTILINE))
+    if not matches:
+        return compact_prompt_block(text, max_chars=max_chars, max_lines=max_lines)
+    keywords = [k.lower() for k in heading_keywords]
+    selected_chunks: List[str] = []
+    for idx, match in enumerate(matches):
+        heading = match.group(1).strip().lower()
+        if not any(key in heading for key in keywords):
+            continue
+        start = match.start()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        selected_chunks.append(text[start:end].strip())
+    if not selected_chunks:
+        return compact_prompt_block(text, max_chars=max_chars, max_lines=max_lines)
+    merged = "\n\n".join(selected_chunks)
+    return compact_prompt_block(merged, max_chars=max_chars, max_lines=max_lines)
 
 
 def build_heuristics_context(max_chars: int = 4000) -> str:
@@ -1572,6 +1648,8 @@ def initial_priority_plan(
     args: argparse.Namespace,
     objectives_excerpt: str,
     soul_excerpt: str,
+    problem_definition_excerpt: str,
+    skills_excerpt: str,
     codebase_excerpt: str,
     sqlite_excerpt: str,
     nc_strategy_excerpt: str,
@@ -1581,29 +1659,44 @@ def initial_priority_plan(
     default_plan = default_initial_priority_plan(args)
     prompt_warning = ""
     try:
+        objectives_compact = compact_prompt_block(objectives_excerpt, max_chars=2600, max_lines=70)
+        soul_compact = compact_prompt_block(soul_excerpt, max_chars=1700, max_lines=55)
+        problem_compact = compact_prompt_block(problem_definition_excerpt, max_chars=1600, max_lines=50)
+        skills_compact = compact_prompt_block(skills_excerpt, max_chars=1400, max_lines=45)
+        codebase_compact = compact_prompt_block(codebase_excerpt, max_chars=1400, max_lines=45)
+        compute_compact = compact_prompt_block(compute_context_excerpt, max_chars=900, max_lines=35)
+        constraint_compact = compact_prompt_block(constraint_context_excerpt, max_chars=1100, max_lines=45)
+        sqlite_compact = compact_prompt_block(sqlite_excerpt, max_chars=1400, max_lines=55)
+        nc_strategy_compact = compact_prompt_block(nc_strategy_excerpt, max_chars=1200, max_lines=40)
         prompt = textwrap.dedent(
             f"""
             You are generating the initial research plan for a two-scientist SMB campaign.
             Objective context:
-            {objectives_excerpt}
+            {objectives_compact}
 
             Scientist operating rules:
-            {soul_excerpt}
+            {soul_compact}
+
+            Problem framing context:
+            {problem_compact}
+
+            SMB physics context:
+            {skills_compact}
 
             Codebase context:
-            {codebase_excerpt}
+            {codebase_compact}
 
             Runtime compute context:
-            {compute_context_excerpt}
+            {compute_compact}
 
             Simulation objective/constraint context:
-            {constraint_context_excerpt}
+            {constraint_compact}
 
             Existing SQLite run history:
-            {sqlite_excerpt}
+            {sqlite_compact}
 
             NC strategy board (screen all layouts before deep sweeps):
-            {nc_strategy_excerpt}
+            {nc_strategy_compact}
 
             Requirements:
             - provide concrete strategy for screening all NC layouts in this library before deep seed exploration
@@ -1626,6 +1719,8 @@ def initial_priority_plan(
             "You are generating an initial SMB research plan. Return JSON only with keys "
             "priorities, proposed_simulations, risks, nc_screening_strategy, reason.\n\n"
             f"Objective context:\n{objectives_excerpt}\n\n"
+            f"Problem framing context:\n{problem_definition_excerpt}\n\n"
+            f"SMB physics context:\n{skills_excerpt}\n\n"
             f"Runtime compute context:\n{compute_context_excerpt}\n\n"
             f"Constraint context:\n{constraint_context_excerpt}\n\n"
             f"NC strategy board:\n{nc_strategy_excerpt}\n\n"
@@ -3587,8 +3682,62 @@ def main() -> int:
     conversation_artifact = conversation_log_path(args)
     conversation_stream_artifact = conversation_stream_log_path(args, conversation_artifact)
     research_path = Path(args.research_md)
-    objectives_excerpt = read_doc_excerpt(args.objectives_file, max_chars=args.objectives_max_chars)
-    soul_excerpt = read_doc_excerpt(args.llm_soul_file, max_chars=args.llm_soul_max_chars)
+    objectives_excerpt = markdown_focused_excerpt(
+        args.objectives_file,
+        heading_keywords=(
+            "mission",
+            "optimization goal",
+            "components and basis",
+            "desorbent composition",
+            "smb configuration",
+            "hard operating constraints",
+            "required workflow",
+            "mandatory nc-coverage",
+        ),
+        max_chars=args.objectives_max_chars,
+        max_lines=150,
+    )
+    soul_excerpt = markdown_focused_excerpt(
+        args.llm_soul_file,
+        heading_keywords=(
+            "role",
+            "core principle",
+            "acquisition strategy protocol",
+            "mandatory deep review",
+            "what scientist_b must check",
+            "when to stop",
+            "reporting style",
+        ),
+        max_chars=args.llm_soul_max_chars,
+        max_lines=130,
+    )
+    problem_definition_excerpt = markdown_focused_excerpt(
+        args.problem_definition_file,
+        heading_keywords=(
+            "core question",
+            "optimization problem",
+            "what kind of optimization problem",
+            "fixed-budget rule",
+            "five-hour benchmark protocol",
+            "recommended success criteria",
+        ),
+        max_chars=args.problem_definition_max_chars,
+        max_lines=110,
+    )
+    skills_excerpt = markdown_focused_excerpt(
+        args.skills_file,
+        heading_keywords=(
+            "zone functions",
+            "flow mass balance",
+            "switching time",
+            "multi-fidelity",
+            "solver status",
+            "purity and recovery",
+            "physical hardware constraints",
+        ),
+        max_chars=args.skills_max_chars,
+        max_lines=100,
+    )
     ipopt_excerpt = read_doc_excerpt(args.ipopt_resource_file, max_chars=args.ipopt_resource_max_chars)
     client = OpenAICompatClient(
         args.llm_base_url,
@@ -3633,6 +3782,8 @@ def main() -> int:
             args,
             objectives_excerpt,
             soul_excerpt,
+            problem_definition_excerpt,
+            skills_excerpt,
             code_context_excerpt,
             initial_sqlite_excerpt,
             initial_nc_strategy_excerpt,
@@ -4045,9 +4196,13 @@ def main() -> int:
             "docs": {
                 "objectives_file": args.objectives_file,
                 "llm_soul_file": args.llm_soul_file,
+                "problem_definition_file": args.problem_definition_file,
+                "skills_file": args.skills_file,
                 "ipopt_resource_file": args.ipopt_resource_file,
                 "objectives_excerpt": objectives_excerpt,
                 "llm_soul_excerpt": soul_excerpt,
+                "problem_definition_excerpt": problem_definition_excerpt,
+                "skills_excerpt": skills_excerpt,
                 "ipopt_resource_excerpt": ipopt_excerpt,
                 "compute_context_excerpt": compute_context_excerpt,
                 "constraint_context_excerpt": constraint_context_excerpt,
