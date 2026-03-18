@@ -3712,6 +3712,11 @@ def write_conversation_log(path: Path, payload: Dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
 
 
+def progress_log(message: str) -> None:
+    """Emit compact progress markers into Slurm stdout for bottleneck diagnosis."""
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
+
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
@@ -3808,6 +3813,7 @@ def main() -> int:
     sim_counter = 0  # global simulation counter for convergence tracking
 
     try:
+        progress_log("AGENT: init start")
         initialize_conversation_stream(conversation_stream_artifact)
         if args.reset_research_section:
             reset_research_run_section(research_path, args.run_name)
@@ -3818,7 +3824,9 @@ def main() -> int:
             initial_plan = default_initial_priority_plan(args)
             initial_plan["reason"] = "LLM initial planning skipped (SMB_SKIP_INITIAL_PLAN_LLM=1) for faster startup."
             initial_plan["mode"] = "deterministic_compact_startup"
+            progress_log("AGENT: initial priority plan skipped (deterministic)")
         else:
+            progress_log("AGENT: initial priority plan LLM start")
             initial_plan = initial_priority_plan(
                 client,
                 args,
@@ -3832,6 +3840,7 @@ def main() -> int:
                 compute_context_excerpt,
                 constraint_context_excerpt,
             )
+            progress_log("AGENT: initial priority plan LLM done")
         current_priorities = normalize_text_list(initial_plan.get("priorities"), max_items=16)
         start_research_log(
             research_path,
@@ -3845,7 +3854,9 @@ def main() -> int:
             sqlite_layout_trend_table(sqlite_conn),
         )
 
+        progress_log("AGENT: solver-check start")
         solver_check = rs.run_solver_check(configure_stage_args(make_stage_args("solver-check"), args))
+        progress_log("AGENT: solver-check done")
         search_tasks = build_search_tasks(args)
         search_hours_used = 0.0
         validation_hours_used = 0.0
@@ -3858,11 +3869,17 @@ def main() -> int:
             and search_hours_used < args.search_hours
         ):
             search_iteration += 1
+            progress_log(
+                "AGENT: iteration "
+                + str(search_iteration)
+                + f" start (tried={len(tried)}/{len(search_tasks)}, search_hours={search_hours_used:.3f})"
+            )
             sqlite_excerpt = sqlite_history_context(sqlite_conn)
             nc_strategy_excerpt = nc_strategy_board(sqlite_conn, nc_library_values)
             research_excerpt = read_research_tail(research_path, args.research_tail_chars)
             convergence_excerpt = sqlite_convergence_context(sqlite_conn, args.run_name)
             try:
+                progress_log(f"AGENT: Scientist_A pick start (iter={search_iteration})")
                 idx, a_note = scientist_a_pick(
                     client,
                     search_tasks,
@@ -3883,6 +3900,7 @@ def main() -> int:
                     heuristics_context=heuristics_excerpt,
                     convergence_context=convergence_excerpt,
                 )
+                progress_log(f"AGENT: Scientist_A pick done (iter={search_iteration})")
             except Exception as exc:
                 idx = deterministic_select(search_tasks, tried)
                 a_note = {
@@ -3943,6 +3961,7 @@ def main() -> int:
                 b_note = single_scientist_policy_review(task, best_so_far)
             else:
                 try:
+                    progress_log(f"AGENT: Scientist_B review start (iter={search_iteration})")
                     b_note = scientist_b_review(
                         client,
                         task,
@@ -3959,6 +3978,7 @@ def main() -> int:
                         sqlite_excerpt,
                         search_iteration,
                     )
+                    progress_log(f"AGENT: Scientist_B review done (iter={search_iteration})")
                 except Exception as exc:
                     b_note = {
                         "mode": "deterministic_error",
@@ -4035,6 +4055,7 @@ def main() -> int:
                         research_path,
                         f"- execution_policy: {forced_policy.get('reason')}\n",
                     )
+                progress_log(f"AGENT: execute search_executive_forced start task={forced_task}")
                 result = execute_search_task(
                     args,
                     forced_task,
@@ -4044,6 +4065,11 @@ def main() -> int:
                         else None
                     ),
                     execution_note=str(forced_policy.get("reason", "")),
+                )
+                progress_log(
+                    "AGENT: execute search_executive_forced done "
+                    + f"run={result.get('run_name')} status={result.get('status')} "
+                    + f"wall_s={float(((result.get('timing') or {}).get('wall_seconds') or 0.0)):.1f}"
                 )
                 result["executive_forced"] = True
                 result["executive_forced_from_task"] = task
@@ -4083,6 +4109,7 @@ def main() -> int:
                     research_path,
                     f"- execution_policy: {execution_policy.get('reason')}\n",
                 )
+            progress_log(f"AGENT: execute search start task={task}")
             result = execute_search_task(
                 args,
                 task,
@@ -4092,6 +4119,11 @@ def main() -> int:
                     else None
                 ),
                 execution_note=str(execution_policy.get("reason", "")),
+            )
+            progress_log(
+                "AGENT: execute search done "
+                + f"run={result.get('run_name')} status={result.get('status')} "
+                + f"wall_s={float(((result.get('timing') or {}).get('wall_seconds') or 0.0)):.1f}"
             )
             search_results.append(result)
             persist_result_to_sqlite(sqlite_conn, args.run_name, "search", result)
@@ -4135,7 +4167,15 @@ def main() -> int:
         for ordinal, candidate in enumerate(validation_pool, start=1):
             if validation_hours_used >= args.validation_hours:
                 break
+            progress_log(
+                f"AGENT: validation start ordinal={ordinal} source_run={candidate.get('run_name')}"
+            )
             validation = execute_validation(args, candidate, ordinal)
+            progress_log(
+                "AGENT: validation done "
+                + f"run={validation.get('run_name')} status={validation.get('status')} "
+                + f"wall_s={float(((validation.get('timing') or {}).get('wall_seconds') or 0.0)):.1f}"
+            )
             validation_results.append(validation)
             persist_result_to_sqlite(sqlite_conn, args.run_name, "validation", validation)
             append_result_research(research_path, validation, "validation")
