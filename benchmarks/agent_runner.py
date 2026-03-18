@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--conversation-stream-log", default=os.environ.get("SMB_CONVERSATION_STREAM_LOG", ""))
     parser.add_argument("--sqlite-db", default=os.environ.get("SMB_SQLITE_DB", str(REPO_ROOT / "artifacts" / "agent_runs" / "smb_agent_context.sqlite")))
     parser.add_argument("--research-md", default=os.environ.get("SMB_RESEARCH_MD", str(REPO_ROOT / "research.md")))
-    parser.add_argument("--research-tail-chars", type=int, default=int(os.environ.get("SMB_RESEARCH_TAIL_CHARS", "2500")))
+    parser.add_argument("--research-tail-chars", type=int, default=int(os.environ.get("SMB_RESEARCH_TAIL_CHARS", "1200")))
     parser.add_argument("--reset-research-section", action="store_true", default=os.environ.get("SMB_RESEARCH_RESET_SECTION", "0") == "1")
     parser.add_argument("--nc-library", default=os.environ.get("SMB_NC_LIBRARY", "1,2,3,2;2,2,2,2;1,3,2,2"))
     parser.add_argument("--seed-library", default=os.environ.get("SMB_SEED_LIBRARY", "notebook"))
@@ -140,7 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=int(os.environ.get("SMB_FINALIZATION_LOW_FIDELITY_NCP", os.environ.get("SMB_PROBE_NCP", "1"))),
     )
     parser.add_argument("--llm-timeout-seconds", type=float, default=float(os.environ.get("SMB_LLM_TIMEOUT_SECONDS", "300")))
-    parser.add_argument("--llm-max-retries", type=int, default=int(os.environ.get("SMB_LLM_MAX_RETRIES", "2")))
+    parser.add_argument("--llm-max-retries", type=int, default=int(os.environ.get("SMB_LLM_MAX_RETRIES", "1")))
     parser.add_argument(
         "--llm-retry-backoff-seconds",
         type=float,
@@ -149,27 +149,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--objectives-max-chars",
         type=int,
-        default=int(os.environ.get("SMB_OBJECTIVES_MAX_CHARS", "6000")),
+        default=int(os.environ.get("SMB_OBJECTIVES_MAX_CHARS", "3000")),
     )
     parser.add_argument(
         "--llm-soul-max-chars",
         type=int,
-        default=int(os.environ.get("SMB_LLM_SOUL_MAX_CHARS", "3500")),
+        default=int(os.environ.get("SMB_LLM_SOUL_MAX_CHARS", "1800")),
     )
     parser.add_argument(
         "--problem-definition-max-chars",
         type=int,
-        default=int(os.environ.get("SMB_PROBLEM_DEFINITION_MAX_CHARS", "2500")),
+        default=int(os.environ.get("SMB_PROBLEM_DEFINITION_MAX_CHARS", "1200")),
     )
     parser.add_argument(
         "--skills-max-chars",
         type=int,
-        default=int(os.environ.get("SMB_SKILLS_MAX_CHARS", "2200")),
+        default=int(os.environ.get("SMB_SKILLS_MAX_CHARS", "1200")),
     )
     parser.add_argument(
         "--ipopt-resource-max-chars",
         type=int,
-        default=int(os.environ.get("SMB_IPOPT_RESOURCE_MAX_CHARS", "1600")),
+        default=int(os.environ.get("SMB_IPOPT_RESOURCE_MAX_CHARS", "900")),
+    )
+    parser.add_argument(
+        "--skip-initial-plan-llm",
+        type=int,
+        default=int(os.environ.get("SMB_SKIP_INITIAL_PLAN_LLM", "1")),
     )
     parser.add_argument("--tee", action="store_true", default=os.environ.get("SMB_AGENT_TEE", "0") == "1")
     parser.add_argument("--llm-enabled", action="store_true", default=os.environ.get("SMB_AGENT_LLM_ENABLED", "1") == "1")
@@ -1659,28 +1664,29 @@ def initial_priority_plan(
     default_plan = default_initial_priority_plan(args)
     prompt_warning = ""
     try:
-        objectives_compact = compact_prompt_block(objectives_excerpt, max_chars=2600, max_lines=70)
-        soul_compact = compact_prompt_block(soul_excerpt, max_chars=1700, max_lines=55)
-        problem_compact = compact_prompt_block(problem_definition_excerpt, max_chars=1600, max_lines=50)
-        skills_compact = compact_prompt_block(skills_excerpt, max_chars=1400, max_lines=45)
-        codebase_compact = compact_prompt_block(codebase_excerpt, max_chars=1400, max_lines=45)
-        compute_compact = compact_prompt_block(compute_context_excerpt, max_chars=900, max_lines=35)
-        constraint_compact = compact_prompt_block(constraint_context_excerpt, max_chars=1100, max_lines=45)
-        sqlite_compact = compact_prompt_block(sqlite_excerpt, max_chars=1400, max_lines=55)
-        nc_strategy_compact = compact_prompt_block(nc_strategy_excerpt, max_chars=1200, max_lines=40)
+        objectives_compact = compact_prompt_block(objectives_excerpt, max_chars=1200, max_lines=35)
+        soul_compact = compact_prompt_block(soul_excerpt, max_chars=900, max_lines=30)
+        problem_compact = compact_prompt_block(problem_definition_excerpt, max_chars=700, max_lines=24)
+        skills_compact = compact_prompt_block(skills_excerpt, max_chars=700, max_lines=24)
+        codebase_compact = compact_prompt_block(codebase_excerpt, max_chars=700, max_lines=24)
+        compute_compact = compact_prompt_block(compute_context_excerpt, max_chars=420, max_lines=16)
+        constraint_compact = compact_prompt_block(constraint_context_excerpt, max_chars=560, max_lines=20)
+        sqlite_compact = compact_prompt_block(sqlite_excerpt, max_chars=700, max_lines=24)
+        nc_strategy_compact = compact_prompt_block(nc_strategy_excerpt, max_chars=650, max_lines=22)
         prompt = textwrap.dedent(
             f"""
-            You are generating the initial research plan for a two-scientist SMB campaign.
+            Build a minimal, evidence-first initial plan for a two-scientist SMB campaign.
+
             Objective context:
             {objectives_compact}
 
-            Scientist operating rules:
+            Operating rules:
             {soul_compact}
 
-            Problem framing context:
+            Problem framing:
             {problem_compact}
 
-            SMB physics context:
+            SMB physics:
             {skills_compact}
 
             Codebase context:
@@ -1692,16 +1698,16 @@ def initial_priority_plan(
             Simulation objective/constraint context:
             {constraint_compact}
 
-            Existing SQLite run history:
+            SQLite history:
             {sqlite_compact}
 
-            NC strategy board (screen all layouts before deep sweeps):
+            NC strategy board:
             {nc_strategy_compact}
 
             Requirements:
-            - provide concrete strategy for screening all NC layouts in this library before deep seed exploration
-            - reference compute budget explicitly
-            - reference constraints explicitly
+            - screen all NC layouts before deep seed sweeps
+            - be explicit on budget and constraints
+            - keep list items short
 
             Respond with JSON only:
             {{
@@ -1713,6 +1719,7 @@ def initial_priority_plan(
             }}
             """
         ).strip()
+        prompt = compact_prompt_block(prompt, max_chars=2200, max_lines=80)
     except Exception as exc:
         prompt_warning = f"Prompt build warning: {type(exc).__name__}: {exc}"
         prompt = (
@@ -2737,25 +2744,25 @@ def scientist_a_pick(
     convergence_context: str = "",
 ) -> Tuple[int, Dict[str, object]]:
     remaining = [task for task in candidate_tasks if (tuple(task["nc"]), str(task["seed_name"])) not in tried]
-    shortlist = remaining[: min(len(remaining), 5)]
+    shortlist = remaining[: min(len(remaining), 4)]
     default_index = deterministic_select(candidate_tasks, tried)
     if not shortlist:
         return default_index, {"mode": "deterministic", "reason": "No remaining tasks."}
 
     best = rank_any_results(results)[0] if results else None
     recent_two_block, recent_two_labels = recent_two_run_review_context(results)
-    objectives_compact = compact_prompt_block(objectives_excerpt, max_chars=1500, max_lines=40)
-    soul_compact = compact_prompt_block(soul_excerpt, max_chars=1200, max_lines=35)
-    codebase_compact = compact_prompt_block(codebase_context_excerpt, max_chars=900, max_lines=28)
-    compute_compact = compact_prompt_block(compute_context_excerpt, max_chars=600, max_lines=22)
-    constraint_compact = compact_prompt_block(constraint_context_excerpt, max_chars=800, max_lines=28)
-    heuristics_compact = compact_prompt_block(heuristics_context, max_chars=900, max_lines=30)
-    convergence_compact = compact_prompt_block(convergence_context, max_chars=800, max_lines=28)
-    research_compact = compact_prompt_block(research_excerpt, max_chars=700, max_lines=22)
-    nc_strategy_compact = compact_prompt_block(nc_strategy_excerpt, max_chars=900, max_lines=30)
-    sqlite_compact = compact_prompt_block(sqlite_context_excerpt, max_chars=1100, max_lines=35)
-    recent_two_compact = compact_prompt_block(recent_two_block, max_chars=800, max_lines=28)
-    priorities_compact = "\n".join(f"- {p}" for p in current_priorities[:8]) or "- none"
+    objectives_compact = compact_prompt_block(objectives_excerpt, max_chars=850, max_lines=26)
+    soul_compact = compact_prompt_block(soul_excerpt, max_chars=650, max_lines=22)
+    codebase_compact = compact_prompt_block(codebase_context_excerpt, max_chars=420, max_lines=16)
+    compute_compact = compact_prompt_block(compute_context_excerpt, max_chars=260, max_lines=12)
+    constraint_compact = compact_prompt_block(constraint_context_excerpt, max_chars=420, max_lines=16)
+    heuristics_compact = compact_prompt_block(heuristics_context, max_chars=450, max_lines=16)
+    convergence_compact = compact_prompt_block(convergence_context, max_chars=420, max_lines=16)
+    research_compact = compact_prompt_block(research_excerpt, max_chars=320, max_lines=12)
+    nc_strategy_compact = compact_prompt_block(nc_strategy_excerpt, max_chars=520, max_lines=18)
+    sqlite_compact = compact_prompt_block(sqlite_context_excerpt, max_chars=520, max_lines=18)
+    recent_two_compact = compact_prompt_block(recent_two_block, max_chars=420, max_lines=16)
+    priorities_compact = "\n".join(f"- {p}" for p in current_priorities[:6]) or "- none"
     shortlist_brief = [
         {"index": i, "nc": list(item["nc"]), "seed_name": str(item["seed_name"])}
         for i, item in enumerate(shortlist)
@@ -2764,12 +2771,10 @@ def scientist_a_pick(
     try:
         prompt = textwrap.dedent(
             f"""
-            You are Scientist_A for an SMB optimization benchmark.
-            Think aggressively and evidence-first. Do not give generic plans.
-            Every proposal must be triple-grounded: DATA (SQLite history, convergence tracker) + PHYSICS (zone theory, mass balance) + HEURISTICS (hypotheses.json, failures.json patterns).
-            Before choosing a new experiment, you must compare it against previous results (at minimum: current best and one recent failed run).
-            If evidence is weak, propose a diagnostic run and state why.
-            Each simulation is expensive. Your competitive advantage over brute-force MINLP is choosing the HIGHEST-VALUE next experiment. Justify why this candidate is the most informative use of the next solver call.
+            You are Scientist_A for SMB optimization.
+            Be concise and evidence-first.
+            Ground each proposal in data + physics + heuristics.
+            Compare against prior runs before proposing the next run.
 
             Objective summary:
             {objectives_compact}
@@ -2863,6 +2868,7 @@ def scientist_a_pick(
             }}
             """
         ).strip()
+        prompt = compact_prompt_block(prompt, max_chars=3200, max_lines=105)
     except Exception as exc:
         prompt_warning = f"Prompt build warning: {type(exc).__name__}: {exc}"
         prompt = (
@@ -3170,14 +3176,14 @@ def scientist_b_review(
     default = deterministic_review(task, best_result)
     prompt_warning = ""
     recent_two_block, recent_two_labels = recent_two_run_review_context(results)
-    codebase_compact = compact_prompt_block(codebase_context_excerpt, max_chars=900, max_lines=28)
-    compute_compact = compact_prompt_block(compute_context_excerpt, max_chars=600, max_lines=22)
-    constraint_compact = compact_prompt_block(constraint_context_excerpt, max_chars=800, max_lines=28)
-    nc_strategy_compact = compact_prompt_block(nc_strategy_excerpt, max_chars=900, max_lines=30)
-    research_compact = compact_prompt_block(research_excerpt, max_chars=700, max_lines=22)
-    sqlite_compact = compact_prompt_block(sqlite_context_excerpt, max_chars=1100, max_lines=35)
-    recent_two_compact = compact_prompt_block(recent_two_block, max_chars=800, max_lines=28)
-    priorities_compact = "\n".join(f"- {p}" for p in current_priorities[:8]) or "- none"
+    codebase_compact = compact_prompt_block(codebase_context_excerpt, max_chars=420, max_lines=16)
+    compute_compact = compact_prompt_block(compute_context_excerpt, max_chars=260, max_lines=12)
+    constraint_compact = compact_prompt_block(constraint_context_excerpt, max_chars=420, max_lines=16)
+    nc_strategy_compact = compact_prompt_block(nc_strategy_excerpt, max_chars=520, max_lines=18)
+    research_compact = compact_prompt_block(research_excerpt, max_chars=320, max_lines=12)
+    sqlite_compact = compact_prompt_block(sqlite_context_excerpt, max_chars=520, max_lines=18)
+    recent_two_compact = compact_prompt_block(recent_two_block, max_chars=420, max_lines=16)
+    priorities_compact = "\n".join(f"- {p}" for p in current_priorities[:6]) or "- none"
     proposed_task_brief = {"nc": list(task.get("nc", [])), "seed_name": str(task.get("seed_name", ""))}
     effective_task_brief = {
         "nc": list(effective_task.get("nc", [])) if isinstance(effective_task.get("nc"), list) else list(task.get("nc", [])),
@@ -3251,6 +3257,7 @@ def scientist_b_review(
             }}
             """
         ).strip()
+        prompt = compact_prompt_block(prompt, max_chars=2800, max_lines=95)
     except Exception as exc:
         prompt_warning = f"Prompt build warning: {type(exc).__name__}: {exc}"
         prompt = (
@@ -3797,7 +3804,7 @@ def main() -> int:
     executive_log: List[Dict[str, object]] = []
     ledger: List[Dict[str, object]] = []
     tried: set[Tuple[Tuple[int, ...], str]] = set()
-    heuristics_excerpt = build_heuristics_context(max_chars=1800)
+    heuristics_excerpt = build_heuristics_context(max_chars=900)
     sim_counter = 0  # global simulation counter for convergence tracking
 
     try:
@@ -3807,19 +3814,24 @@ def main() -> int:
         nc_library_values = [list(nc) for nc in rs.parse_nc_library(args.nc_library)]
         initial_sqlite_excerpt = sqlite_history_context(sqlite_conn)
         initial_nc_strategy_excerpt = nc_strategy_board(sqlite_conn, nc_library_values)
-        initial_plan = initial_priority_plan(
-            client,
-            args,
-            objectives_excerpt,
-            soul_excerpt,
-            problem_definition_excerpt,
-            skills_excerpt,
-            code_context_excerpt,
-            initial_sqlite_excerpt,
-            initial_nc_strategy_excerpt,
-            compute_context_excerpt,
-            constraint_context_excerpt,
-        )
+        if int(getattr(args, "skip_initial_plan_llm", 1)) == 1:
+            initial_plan = default_initial_priority_plan(args)
+            initial_plan["reason"] = "LLM initial planning skipped (SMB_SKIP_INITIAL_PLAN_LLM=1) for faster startup."
+            initial_plan["mode"] = "deterministic_compact_startup"
+        else:
+            initial_plan = initial_priority_plan(
+                client,
+                args,
+                objectives_excerpt,
+                soul_excerpt,
+                problem_definition_excerpt,
+                skills_excerpt,
+                code_context_excerpt,
+                initial_sqlite_excerpt,
+                initial_nc_strategy_excerpt,
+                compute_context_excerpt,
+                constraint_context_excerpt,
+            )
         current_priorities = normalize_text_list(initial_plan.get("priorities"), max_items=16)
         start_research_log(
             research_path,
@@ -4091,7 +4103,7 @@ def main() -> int:
                 acquisition_type=acq_type,
             )
             # Refresh heuristics after each run so next proposal uses updated knowledge
-            heuristics_excerpt = build_heuristics_context(max_chars=4000)
+            heuristics_excerpt = build_heuristics_context(max_chars=900)
             append_result_research(research_path, result, "search")
             append_research(
                 research_path,

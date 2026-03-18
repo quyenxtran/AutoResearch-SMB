@@ -223,6 +223,14 @@ export SMB_IPOPT_RESOURCE_FILE="${SMB_IPOPT_RESOURCE_FILE:-${IPOPT_RESOURCE_FILE
 export SMB_RESEARCH_MD="${SMB_RESEARCH_MD:-${REPO_ROOT}/research.md}"
 export SMB_REFERENCE_NOTEBOOK="${SMB_REFERENCE_NOTEBOOK:-${NOTEBOOK_REFERENCE}}"
 export SMB_REFERENCE_MODEL_ROOT="${SMB_REFERENCE_MODEL_ROOT:-${SMB_ROOT}}"
+export SMB_SKIP_INITIAL_PLAN_LLM="${SMB_SKIP_INITIAL_PLAN_LLM:-1}"
+export SMB_RESEARCH_TAIL_CHARS="${SMB_RESEARCH_TAIL_CHARS:-1200}"
+export SMB_OBJECTIVES_MAX_CHARS="${SMB_OBJECTIVES_MAX_CHARS:-3000}"
+export SMB_LLM_SOUL_MAX_CHARS="${SMB_LLM_SOUL_MAX_CHARS:-1800}"
+export SMB_PROBLEM_DEFINITION_MAX_CHARS="${SMB_PROBLEM_DEFINITION_MAX_CHARS:-1200}"
+export SMB_SKILLS_MAX_CHARS="${SMB_SKILLS_MAX_CHARS:-1200}"
+export SMB_IPOPT_RESOURCE_MAX_CHARS="${SMB_IPOPT_RESOURCE_MAX_CHARS:-900}"
+export SMB_LLM_MAX_RETRIES="${SMB_LLM_MAX_RETRIES:-1}"
 export SMB_FORCE_MUMPS_ONLY="${SMB_FORCE_MUMPS_ONLY:-1}"
 export SMB_SOLVER_NAME="${SMB_SOLVER_NAME:-auto}"
 export SMB_LINEAR_SOLVER="${SMB_LINEAR_SOLVER:-mumps}"
@@ -250,9 +258,12 @@ OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://${OLLAMA_HOST}/v1}"
 OLLAMA_LOG="${OLLAMA_LOG:-$LOG_DIR/ollama-smb-${SLURM_JOB_ID:-local}.log}"
 OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
 OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}"
-OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-2}"
-OLLAMA_LOAD_TIMEOUT="${OLLAMA_LOAD_TIMEOUT:-10m}"
+OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
+OLLAMA_LOAD_TIMEOUT="${OLLAMA_LOAD_TIMEOUT:-5m}"
 OLLAMA_GPU_ID="${OLLAMA_GPU_ID:-0}"
+SMB_OLLAMA_PULL_IF_MISSING="${SMB_OLLAMA_PULL_IF_MISSING:-0}"
+SMB_OLLAMA_PREWARM_ENABLED="${SMB_OLLAMA_PREWARM_ENABLED:-1}"
+SMB_OLLAMA_PREWARM_MAX_SECONDS="${SMB_OLLAMA_PREWARM_MAX_SECONDS:-45}"
 export SMB_FALLBACK_LLM_ENABLED="${SMB_FALLBACK_LLM_ENABLED:-1}"
 export SMB_FALLBACK_LLM_BASE_URL="${SMB_FALLBACK_LLM_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}"
 export SMB_FALLBACK_LLM_MODEL="${SMB_FALLBACK_LLM_MODEL:-gpt-5-nano}"
@@ -402,7 +413,7 @@ cleanup_local_llm() {
 trap cleanup_local_llm EXIT
 
 start_local_qwen() {
-  local ollama_exec ready ready_url max_attempts prompt_payload response_file http_code
+  local ollama_exec ready ready_url max_attempts prompt_payload response_file http_code prewarm_url
   if [[ "${START_LOCAL_LLM}" != "1" ]]; then
     return 0
   fi
@@ -457,26 +468,33 @@ start_local_qwen() {
   fi
 
   if ! OLLAMA_HOST="${OLLAMA_HOST}" "${ollama_exec}" list 2>/dev/null | awk 'NR>1 {print $1}' | grep -Fxq "${OLLAMA_MODEL}"; then
-    echo "[$(date '+%F %T')] PULL: ${OLLAMA_MODEL}"
-    OLLAMA_HOST="${OLLAMA_HOST}" "${ollama_exec}" pull "${OLLAMA_MODEL}"
+    if [[ "${SMB_OLLAMA_PULL_IF_MISSING}" == "1" ]]; then
+      echo "[$(date '+%F %T')] PULL: ${OLLAMA_MODEL}"
+      OLLAMA_HOST="${OLLAMA_HOST}" "${ollama_exec}" pull "${OLLAMA_MODEL}"
+    else
+      echo "WARN: local model '${OLLAMA_MODEL}' not found and SMB_OLLAMA_PULL_IF_MISSING=0"
+      cleanup_local_llm
+      return 1
+    fi
   fi
 
-  prompt_payload=$(printf '{"model":"%s","messages":[{"role":"user","content":"Reply with exactly: pong"}],"stream":false,"max_tokens":16,"temperature":0}' "${OLLAMA_MODEL}")
-  response_file="$(mktemp)"
-  http_code="$(curl -sS \
-    --max-time 180 \
-    -o "${response_file}" \
-    -w '%{http_code}' \
-    -H "Content-Type: application/json" \
-    -H "Authorization: Bearer ${OLLAMA_API_KEY:-ollama}" \
-    -d "${prompt_payload}" \
-    "${OLLAMA_BASE_URL%/}/chat/completions" || true)"
-  rm -f "${response_file}"
+  if [[ "${SMB_OLLAMA_PREWARM_ENABLED}" == "1" ]]; then
+    prewarm_url="${OLLAMA_BASE_URL%/v1}/api/generate"
+    prompt_payload=$(printf '{"model":"%s","prompt":"Reply with exactly: pong","stream":false,"options":{"num_predict":8,"temperature":0}}' "${OLLAMA_MODEL}")
+    response_file="$(mktemp)"
+    http_code="$(curl -sS \
+      --connect-timeout 2 \
+      --max-time "${SMB_OLLAMA_PREWARM_MAX_SECONDS}" \
+      -o "${response_file}" \
+      -w '%{http_code}' \
+      -H "Content-Type: application/json" \
+      -d "${prompt_payload}" \
+      "${prewarm_url}" || true)"
+    rm -f "${response_file}"
 
-  if [[ ! "${http_code}" =~ ^2 ]]; then
-    echo "WARN: local Qwen prewarm failed with status=${http_code:-<curl-error>}"
-    cleanup_local_llm
-    return 1
+    if [[ ! "${http_code}" =~ ^2 ]]; then
+      echo "WARN: local Qwen prewarm failed with status=${http_code:-<curl-error>} (continuing without prewarm gate)"
+    fi
   fi
 
   export OLLAMA_BASE_URL="${OLLAMA_BASE_URL}"

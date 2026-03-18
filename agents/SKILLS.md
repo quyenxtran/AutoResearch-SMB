@@ -1,97 +1,70 @@
-# SKILLS.md - SMB Physics and Operational Fundamentals
+# SMB Physics Essentials
 
-This file contains physics and numerical fundamentals. It does not encode "best known" operating points.
+## Zone Functions
 
-## 1. SMB Zone Functions
+For 4-zone SMB:
 
-In 4-zone SMB:
+- `Z1`: desorb strongly adsorbed species
+- `Z2`: extract-side cleanup
+- `Z3`: feed-side adsorption/capture split
+- `Z4`: regeneration
 
-- `Z1` (desorbent in -> extract out): desorption of strongly adsorbed species.
-- `Z2` (extract out -> feed in): purification / impurity cleanup on extract side.
-- `Z3` (feed in -> raffinate out): adsorption/capture behavior for target split.
-- `Z4` (raffinate out -> desorbent in): regeneration before returning to Z1.
+Changing `nc=(n1,n2,n3,n4)` changes residence distribution across these functions.
 
-Changing `nc = (n1, n2, n3, n4)` redistributes residence volume across these functions.
-
-## 2. Flow Mass Balance (Critical Invariant)
+## Flow Mass Balance (Critical)
 
 Must hold within tolerance:
 
 - `F1 = Fdes + Fex`
 - `F1 = Ffeed + Fraf`
 
-Derived zone flows:
+Derived:
 
 - `F2 = F1 - Fex`
 - `F3 = F2 + Ffeed`
 - `F4 = F1 - Fdes`
 
-Reject candidates that violate balance materially.
+## Switching Time
 
-## 3. Equilibrium Theory and Feasibility Conditions
+`tstep` interacts with flows and layout:
 
-MLL isotherm is nonlinear and competitive; analytic triangle guarantees from linear systems do not directly apply.
-Practical feasibility still depends on zone functions being preserved under chosen flow/switch settings.
+- too short: under-developed separation
+- too long: front overshoot/cross-contamination
 
-## 4. MLL Isotherm - What the Parameters Mean
+## MLL Isotherm Notes
 
-- `H`: affinity at dilute limit (selectivity driver).
-- `qm`: saturation capacity.
-- `K`: nonlinearity/curvature.
-- `kapp`: mass-transfer approach to equilibrium.
+- nonlinear, competitive coupling
+- `H`, `qm`, `K`, `kapp` jointly shape selectivity/capacity/transfer
+- single-component intuition can fail in multicomponent runs
 
-Competition means component behavior is coupled; isolated intuition can fail.
-
-## 5. Switching Time and Cyclic Steady State
-
-`tstep` controls front travel per switch:
-
-- too short -> insufficient separation development
-- too long -> front overshoot and cross-contamination
-
-`tstep` must be interpreted jointly with flows and layout.
-
-## 6. Multi-Fidelity Discretization
-
-Lower fidelity is faster but less accurate near active constraints.
-Use ladder:
+## Multi-Fidelity Policy
 
 1. low/medium for screening
 2. medium for local refinement
 3. high for final claims
 
-## 7. Solver Status Interpretation
+## Solver Status Interpretation
 
-- `optimal` / `ok`: converged candidate; still check metrics.
-- `infeasible`: no feasible point from that start/setting.
-- `solver_error`: numerical failure; not proof of physical impossibility.
-- `acceptable`: loose convergence; re-check with stricter settings.
-- `maxIterations`: iteration budget exhausted.
+- `optimal`/`ok`: candidate converged; still check constraints
+- `infeasible`: no feasible point found at setup/start
+- `solver_error`: numerical failure, not automatic physical impossibility
+- `acceptable`: loose convergence; re-check
+- `maxIterations`: iteration cap hit
 
-## 8. Purity and Recovery - Exact Definitions
+## Purity and Recovery Definitions
 
-Use code definitions in `metrics.py`:
+Use exact code metrics in `metrics.py`. Do not substitute custom formulas in claims.
 
-- purity is MeOH-free extract purity metric used by project.
-- recovery metrics are component-specific extract recoveries.
-- productivity is extract acid throughput metric used for objective.
+## Physical Hardware Constraints
 
-Do not substitute alternative formulas in comparative claims.
+- external streams within pump limits
+- `F1` within internal circulation limit
+- total columns fixed at 8
+- zone column counts physically meaningful
 
-## 9. Physical Hardware Constraints
+## What Agents Must Learn From Data
 
-Hardware-consistent rules:
-
-- external pump-limited streams stay within external pump capacity.
-- internal circulation (`F1`) obeys internal limit.
-- total columns fixed at 8.
-- all zone column counts remain physically meaningful.
-
-## 10. What the Agents Should Discover, Not Be Told
-
-Must be learned from runs, not assumed:
-
-- best `nc` for current feed/constraints
-- best flow/tstep region
-- local sensitivity around high-performing candidates
-- robustness margins and failure boundaries
+- best feasible `nc`
+- best flow/`tstep` region
+- local sensitivity around top candidates
+- robustness margins/failure boundaries

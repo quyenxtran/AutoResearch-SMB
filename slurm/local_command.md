@@ -1,3 +1,17 @@
+## Deploy new code to PACE
+
+```bash
+# Local: commit and push
+git add .
+git commit -m "further compact initial context"
+git push origin main
+
+# On PACE
+cd ~/AutoResearch-SMB
+git pull
+```
+
+
 ## Ollama 27B model setup (one-time)
 
 ```bash
@@ -24,31 +38,6 @@ EOF
 find "$OLLAMA_MODELS/manifests" -type f | grep -i qwen35-27b-unsloth || echo "MISSING"
 ```
 
----
-
-## Quick 3-job comparative batch (from `~/AutoResearch-SMB`)
-
-```bash
-cd ~/AutoResearch-SMB
-TAG=cmp_$(date +%Y%m%d_%H%M%S)
-export SMB_NC_LIBRARY=all
-export SMB_AGENT_MAX_SEARCH_EVALS=120
-export SMB_MIN_PROBE_REFERENCE_RUNS=35
-export SMB_PROBE_LOW_FIDELITY_ENABLED=1
-export SMB_PROBE_NFEX=5
-export SMB_PROBE_NFET=2
-export SMB_PROBE_NCP=1
-export SMB_IPOPT_MAX_ITER=1000
-export SMB_IPOPT_TOL=1e-5
-export SMB_IPOPT_ACCEPTABLE_TOL=1e-4
-export SMB_FFEED_BOUNDS="0.5,4.0"
-export SMB_FRAF_BOUNDS="0.5,4.0"
-export SMB_MAX_PUMP_ML_MIN=4.0
-
-sbatch --export=ALL,SMB_SUITE_TAG=$TAG slurm/pace_smb_minlp_cpu_24h.slurm
-sbatch --export=ALL,SMB_SUITE_TAG=$TAG slurm/pace_smb_single_scientist_24h.slurm
-sbatch --export=ALL,SMB_SUITE_TAG=$TAG slurm/pace_smb_two_scientists_24h.slurm
-```
 
 ---
 
@@ -203,14 +192,14 @@ slurm/pace_smb_two_scientists_qwen_a100.slurm
 
 ```bash
 # Live output/error
-tail -f ~/AutoResearch-SMB/logs/smb-two-scientists-5050561.out
+tail -f ~/AutoResearch-SMB/logs/smb-two-scientists-5052358.out
 tail -f ~/AutoResearch-SMB/logs/smb-two-scientists-5030528.err
 
 # CPU monitor
 srun --jobid=5030528 --overlap bash -lc 'while true; do top -b -n 1 | head -n 25; sleep 2; done'
 
 # CPU/GPU monitor
-srun --jobid=5050561 --overlap bash -lc '
+srun --jobid=5052358 --overlap bash -lc '
 while true; do
   clear
   echo "=== $(date) ==="
@@ -219,12 +208,13 @@ while true; do
   nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader
   sleep 2
 done'
+
 ```
 
 ## Live conversation stream (while job is running)
 Live compact stream (scientist A/B/C only):
 
-JOB=5050561
+JOB=5052358
 FILE=$(find ~/AutoResearch-SMB/artifacts/agent_runs -maxdepth 1 -type f -name "agent-runner.${JOB}*.conversations.jsonl" | sort | tail -1)
 
 if [ -z "$FILE" ]; then
@@ -287,18 +277,6 @@ ORDER BY feasible DESC, prod DESC
 LIMIT 20;"
 ```
 
-## Deploy new code to PACE
-
-```bash
-# Local: commit and push
-git add .
-git commit -m "your message"
-git push origin main
-
-# On PACE
-cd ~/AutoResearch-SMB
-git pull
-```
 
 
 PORT=11555
