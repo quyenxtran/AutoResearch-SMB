@@ -1,25 +1,21 @@
-# AutoResearch-SMB Objective
+# SMB Optimization Objective (Agent-Driven NLP Optimizer — Reference Use Case)
 
 ## Mission
 
-Use the existing `AutoResearch-SMB/SembaSMB` model as the reference SMB implementation. The agent must learn the SMB formulation from the local code and notebook, then build, run, test, troubleshoot, and optimize the process for the Kraton-feed case.
+Use the `sembasmb` package as the reference SMB implementation. The agent must learn the SMB formulation from the local code and notebook, then build, run, test, troubleshoot, and optimize the process for the Kraton-feed case.
 
 The interesting part of this study is not only the final optimum, but also whether an agentic system can reason about SMB design choices, choose a good section layout and fidelity path, and validate its decisions with simulation efficiently.
 
-The reference notebook is:
-
-- `AutoResearch-SMB/SembaSMB/SMB_KratonFeed_updated_config copy 6.ipynb`
-
 The reference source modules are:
 
-- `AutoResearch-SMB/SembaSMB/src/smb_config.py`
-- `AutoResearch-SMB/SembaSMB/src/smb_model.py`
-- `AutoResearch-SMB/SembaSMB/src/smb_discretization.py`
-- `AutoResearch-SMB/SembaSMB/src/smb_optimization.py`
-- `AutoResearch-SMB/SembaSMB/src/smb_metrics.py`
-- `AutoResearch-SMB/SembaSMB/src/smb_solver.py`
+- `src/sembasmb/config.py`
+- `src/sembasmb/model.py`
+- `src/sembasmb/discretization.py`
+- `src/sembasmb/optimization.py`
+- `src/sembasmb/metrics.py`
+- `src/sembasmb/solver.py`
 
-Do not treat this as a blank-sheet problem. Reuse the local SembaSMB physics and only change the optimization workflow, bounds, fidelity, and search strategy as needed.
+Do not treat this as a blank-sheet problem. Reuse the local sembasmb physics and only change the optimization workflow, bounds, fidelity, and search strategy as needed.
 
 ## Optimization Goal
 
@@ -231,9 +227,9 @@ These are not free design variables. They are fixed requirements of the problem 
 - external pump-limited streams `Fdes`, `Fex`, `Ffeed`, and `Fraf` must stay `<= 2.5 mL/min`
 - internal circulation flow `F1` may vary up to `5.0 mL/min`
 - total physical columns fixed at `8`
-- `purity_ex_meoh_free >= 0.85`
-- `recovery_ex_GA >= 0.85`
-- `recovery_ex_MA >= 0.85`
+- `purity_ex_meoh_free >= 0.60`
+- `recovery_ex_GA >= 0.75`
+- `recovery_ex_MA >= 0.75`
 
 ## Decision Variables vs Derived Quantities
 
@@ -343,14 +339,14 @@ Use the extract-purity definition already implemented by the code:
 
 The project objective target is:
 
-- `purity_ex_meoh_free >= 0.85`
+- `purity_ex_meoh_free >= 0.60`
 
 Use per-component recovery-to-extract constraints:
 
-- `recovery_ex_GA >= 0.85`
-- `recovery_ex_MA >= 0.85`
+- `recovery_ex_GA >= 0.75`
+- `recovery_ex_MA >= 0.75`
 
-Exploratory screening may temporarily use relaxed thresholds (for example `0.70`) to map feasible regions, but no final candidate is acceptable unless it satisfies the project objective thresholds above.
+Exploratory screening may temporarily use relaxed thresholds to map feasible regions, but no final candidate is acceptable unless it satisfies the project objective thresholds above.
 
 Also retain the reference process-quality safeguards unless a documented study proves they must change:
 

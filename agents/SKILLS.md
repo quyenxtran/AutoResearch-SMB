@@ -1,295 +1,144 @@
-# SKILLS.md - Durable Physical Intuition
+# SKILLS.md — SMB Physics and Operational Fundamentals
 
-This document captures proven patterns and physical insights that have been validated across multiple SMB optimization runs. These skills represent durable knowledge that should guide future search behavior and optimization strategies.
-
-## Core Optimization Principles
-
-### 1. Constraint-First Refinement Near Feasible Boundary
-
-**Observation**: When a candidate is close to purity/recovery feasibility, aggressive changes in multiple flow variables often destroy feasibility.
-
-**Physical Intuition**: The system appears locally stiff near the feasible boundary; small coordinated changes are safer than large independent moves.
-
-**Operational Rule**: When all constraint slacks are within 5%, restrict the next move to one or two variables and reduce step size.
-
-**Evidence**: Runs: 184, 191, 203, 217
-
-**Confidence**: High
-
-**Implementation**: 
-- Monitor `normalized_total_violation` < 0.05
-- Limit flow adjustments to max 2 variables simultaneously
-- Reduce perturbation magnitude to 5-10% of current values
-
-### 2. Flow Variable Coupling Patterns
-
-**Observation**: Ffeed and tstep exhibit strong inverse coupling for maintaining productivity while improving purity.
-
-**Physical Intuition**: Higher feed rates require longer switching times to maintain separation efficiency, but excessive tstep reduces throughput.
-
-**Operational Rule**: When adjusting Ffeed, compensate tstep inversely with ratio approximately 1:0.8 to maintain zone residence times.
-
-**Evidence**: Consistent across 15+ optimization cycles in layouts (1,2,3,2) and (2,2,2,2)
-
-**Confidence**: High
-
-**Implementation**:
-- ΔFfeed ↑ 10% → Δtstep ↓ 8%
-- Monitor CE/CR composition changes to validate coupling effectiveness
-
-### 3. Zone 3 Allocation Criticality
-
-**Observation**: Layouts with Zone 3 ≥ 3 columns consistently outperform others for GA/MA separation.
-
-**Physical Intuition**: Zone 3 provides critical desorption capacity; insufficient columns lead to product contamination.
-
-**Operational Rule**: Prioritize layouts where nc[2] (Zone 3) ≥ 3, especially for high-purity targets (>90%).
-
-**Evidence**: Layout (1,2,3,2) shows 15-25% higher productivity than (2,2,2,2) at equivalent purity
-
-**Confidence**: Very High
-
-**Implementation**:
-- Filter candidate layouts to require nc[2] ≥ 3
-- For purity targets >90%, require nc[2] ≥ 4
-
-### 4. F1 Flow as Primary Productivity Lever
-
-**Observation**: F1 adjustments have the strongest positive correlation with productivity while maintaining constraint feasibility.
-
-**Physical Intuition**: F1 controls internal circulation rate, directly affecting mass transfer rates without disrupting external flow balance.
-
-**Operational Rule**: When productivity is suboptimal, prioritize F1 increases (within pump capacity limits) before adjusting other flows.
-
-**Evidence**: 80% of successful productivity improvements involved F1 increases of 5-15%
-
-**Confidence**: High
-
-**Implementation**:
-- Target F1 range: 2.5-4.5 mL/min for standard configurations
-- Monitor pressure drop constraints when increasing F1
-
-### 5. Desorbent Flow (Fdes) Purity Tradeoff
-
-**Observation**: Fdes increases improve recovery but systematically degrade extract purity.
-
-**Physical Intuition**: Higher desorbent flows enhance desorption but also displace more impurities into the extract stream.
-
-**Operational Rule**: Use Fdes as recovery optimization lever only after purity constraints are satisfied; limit increases to 5% increments.
-
-**Evidence**: Every 10% Fdes increase correlates with 2-4% purity reduction
-
-**Confidence**: High
-
-**Implementation**:
-- Set Fdes after achieving target purity
-- Use small increments (≤5%) for recovery fine-tuning
-- Monitor MeOH concentration in extract stream
-
-## Solver and Numerical Patterns
-
-### 6. Low-Fidelity Screening Reliability
-
-**Observation**: Low-fidelity results (nfex≤5, nfet≤2, ncp≤1) reliably predict layout ranking but not absolute performance.
-
-**Physical Intuition**: Coarse discretization captures topology effects but misses fine-scale transport phenomena.
-
-**Operational Rule**: Use low-fidelity for layout screening and initial flow estimation; always validate top candidates at medium/high fidelity.
-
-**Evidence**: Layout ranking correlation r=0.85 between low and high fidelity across 50+ runs
-
-**Confidence**: High
-
-**Implementation**:
-- Screen all layouts at low fidelity first
-- Validate top 3 layouts at medium fidelity
-- Final optimization only on validated candidates
-
-### 7. Solver Status Interpretation
-
-**Observation**: "solver_error" status often indicates constraint infeasibility rather than numerical issues.
-
-**Physical Intuition**: IPOPT fails when the current flow configuration cannot satisfy purity/recovery constraints regardless of optimization.
-
-**Operational Rule**: Treat "solver_error" as constraint violation signal; adjust flows to improve feasibility before retrying.
-
-**Evidence**: 70% of solver_error cases resolved by flow adjustments reducing normalized violation
-
-**Confidence**: High
-
-**Implementation**:
-- On solver_error, check constraint slacks
-- Reduce Ffeed and/or increase Fdes to improve feasibility
-- Consider layout changes if flow adjustments insufficient
-
-### 8. Flow Consistency Enforcement
-
-**Observation**: Violations of flow consistency constraints (F1 = Ffeed + Fraf = Fdes + Fex) correlate with numerical instability.
-
-**Physical Intuition**: Mass balance violations create artificial optimization landscapes that confuse the solver.
-
-**Operational Rule**: Always enforce strict flow consistency; treat any violation >1% as invalid configuration.
-
-**Evidence**: Runs with flow consistency violations show 3x higher solver failure rate
-
-**Confidence**: Very High
-
-**Implementation**:
-- Implement automatic flow consistency checking
-- Reject candidates with violations >1%
-- Use derived flows (Fraf, Fex) rather than independent specification
-
-## Constraint Management Strategies
-
-### 9. Purity vs Recovery Tradeoff Management
-
-**Observation**: Purity and recovery exhibit strong inverse correlation; simultaneous optimization requires careful balancing.
-
-**Physical Intuition**: High purity requires sharp concentration fronts, while high recovery needs complete desorption - these objectives conflict.
-
-**Operational Rule**: Optimize for purity first, then use small Fdes adjustments to recover lost recovery without sacrificing purity.
-
-**Evidence**: Sequential optimization (purity → recovery) outperforms simultaneous approaches by 12% in J_validated
-
-**Confidence**: High
-
-**Implementation**:
-- Set flows for target purity first
-- Fine-tune recovery with Fdes adjustments ≤5%
-- Accept small recovery sacrifices for significant purity gains
-
-### 10. MeOH Concentration Control
-
-**Observation**: Extract MeOH concentration strongly correlates with purity violations.
-
-**Physical Intuition**: MeOH acts as a displacing agent; excessive amounts push impurities into product stream.
-
-**Operational Rule**: Maintain extract MeOH wt% < 0.5% for purity targets >90%.
-
-**Evidence**: All purity violations >5% associated with extract MeOH >0.7%
-
-**Confidence**: High
-
-**Implementation**:
-- Monitor extract MeOH concentration as early warning indicator
-- Reduce Fdes if MeOH concentration approaches 0.5%
-- Consider layout changes if MeOH control impossible
-
-## Search Strategy Patterns
-
-### 11. NC Layout Exploration Order
-
-**Observation**: Systematic layout exploration (all layouts with reference seed first) outperforms random sampling.
-
-**Physical Intuition**: Reference seed provides consistent baseline for comparing layout effects independent of flow optimization.
-
-**Operational Rule**: Always screen all NC layouts with reference seed before deep optimization of any single layout.
-
-**Evidence**: Systematic approach finds optimal layout in 100% of test cases vs 65% for random sampling
-
-**Confidence**: Very High
-
-**Implementation**:
-- Phase 1: All layouts × reference seed
-- Phase 2: Top 3 layouts × expanded seeds
-- Phase 3: Final validation of best candidates
-
-### 12. Budget Allocation Strategy
-
-**Observation**: 70% search / 30% validation budget allocation maximizes discovery of high-quality solutions.
-
-**Physical Intuition**: Most optimization value comes from finding the right layout and flow regime; validation confirms robustness.
-
-**Operational Rule**: Allocate budget with 70% for search, 30% for validation; adjust based on early results.
-
-**Evidence**: 70/30 allocation found optimal solutions in 8/10 benchmark runs vs 5/10 for 50/50 allocation
-
-**Confidence**: Medium
-
-**Implementation**:
-- Monitor search progress and solution quality
-- Shift budget toward validation if high-quality candidates found early
-- Maintain minimum 20% validation budget for robustness testing
-
-## Physics-Based Heuristics
-
-### 13. Residence Time Optimization
-
-**Observation**: Optimal tstep correlates with total column volume and flow rates.
-
-**Physical Intuition**: Switching time must allow sufficient residence for separation while maintaining throughput.
-
-**Operational Rule**: Target tstep ≈ (Total column volume) / (Average flow rate) × 0.8-1.2
-
-**Evidence**: Successful runs cluster around residence time ratio of 0.9-1.1
-
-**Confidence**: Medium
-
-**Implementation**:
-- Calculate theoretical residence time from geometry
-- Search tstep in range 0.8-1.2 × theoretical value
-- Adjust based on purity/recovery performance
-
-### 14. Zone Velocity Balancing
-
-**Observation**: Zone velocities should maintain ratio approximately 1.0:1.2:0.8:1.0 for optimal separation.
-
-**Physical Intuition**: Balanced velocities prevent band broadening and maintain sharp concentration fronts.
-
-**Operational Rule**: Monitor zone velocities; adjust flows to maintain target ratios within ±10%.
-
-**Evidence**: Optimal performance consistently associated with velocity ratios in specified range
-
-**Confidence**: Medium
-
-**Implementation**:
-- Calculate zone velocities from flow rates and column configurations
-- Use velocity ratios as constraint in optimization
-- Prioritize velocity balance over minor productivity gains
-
-### 15. Mass Transfer Limit Recognition
-
-**Observation**: When productivity plateaus despite flow increases, mass transfer limitations are likely.
-
-**Physical Intuition**: Beyond certain flow rates, kinetics rather than thermodynamics limit separation efficiency.
-
-**Operational Rule**: If productivity doesn't increase >2% with 10% flow increase, consider mass transfer limitation.
-
-**Evidence**: Plateau behavior observed in 60% of high-flow optimization attempts
-
-**Confidence**: Medium
-
-**Implementation**:
-- Monitor productivity response to flow changes
-- Consider layout changes (more columns) if mass transfer limited
-- Reduce flow rates and focus on timing optimization
-
-## Implementation Guidelines
-
-### Pattern Application Priority
-
-1. **Always Apply**: Flow consistency, NC layout exploration order, solver status interpretation
-2. **High Priority**: Constraint-first refinement, zone 3 allocation, F1 productivity optimization
-3. **Medium Priority**: Residence time optimization, velocity balancing, mass transfer recognition
-4. **Context Dependent**: MeOH control, purity/recovery tradeoff management, budget allocation
-
-### Validation Requirements
-
-Each skill should be re-validated when:
-- New isotherm models are introduced
-- Feed composition changes significantly
-- Column dimensions are modified
-- Solver settings are updated
-
-### Continuous Improvement
-
-- Log skill application outcomes in research.md
-- Update confidence levels based on new evidence
-- Retire skills with <50% success rate
-- Add new skills as patterns emerge
+This document captures fundamental SMB physics, mass transfer principles, solver behavior, and operational knowledge for the Kraton-feed case. It describes how the system works — not which parameter values are optimal (those must be discovered by experiment and logged in `hypotheses.json`).
 
 ---
 
-**Last Updated**: 2024
-**Validation Status**: Ongoing
-**Next Review**: After next 20 optimization runs
+## 1. SMB Zone Functions
+
+In a 4-zone SMB the four zones have distinct roles:
+
+| Zone | Position | Function |
+|------|----------|----------|
+| Z1 | Desorbent inlet → Extract outlet | Desorption: strips strongly-adsorbed components into extract |
+| Z2 | Extract outlet → Feed inlet | Purification: re-adsorbs impurities that leaked into extract side |
+| Z3 | Feed inlet → Raffinate outlet | Adsorption: retains target components from feed; lets weaker-adsorbed species pass |
+| Z4 | Raffinate outlet → Desorbent inlet | Regeneration: partially strips weakly-adsorbed species before returning to Z1 |
+
+The column allocation `nc = (n1, n2, n3, n4)` distributes physical columns across zones and therefore determines the volume available for each function. Different allocations shift the balance between desorption capacity, purification efficiency, adsorption efficiency, and throughput. Whether more columns in a zone improves or degrades performance depends on the operating flows and isotherm — it must be verified by simulation.
+
+---
+
+## 2. Flow Mass Balance (Critical Invariant)
+
+```
+F1 = Fdes + Fex       (desorbent/extract zone balance)
+F1 = Ffeed + Fraf     (feed/raffinate zone balance)
+```
+
+`Fraf` is **derived**, not an independent decision variable. Any operating point must satisfy both equations within numerical tolerance. Violations produce unphysical concentration profiles and solver failures.
+
+Internal zone flows follow directly from these:
+
+```
+F2 = F1 - Fex
+F3 = F2 + Ffeed
+F4 = F1 - Fdes
+```
+
+Check: `F3 - F4 = Ffeed + Fdes - Fex = Fraf`. Any result that violates `|F1 - Fdes - Fex| / F1 > 0.01` must be rejected.
+
+---
+
+## 3. Equilibrium Theory and Feasibility Conditions
+
+For **linear isotherms**, triangle theory gives analytic zone flow conditions for complete separation. For the **nonlinear MLL isotherm** used here, these conditions become concentration-dependent and cannot be evaluated analytically — but the qualitative logic holds:
+
+- Z1 must carry both target components (flow high enough to desorb all adsorbed mass)
+- Z2 must carry only the strongly-adsorbed component
+- Z3 must carry only the weakly-adsorbed component
+- Z4 must carry neither (flow low enough to re-adsorb remaining impurities)
+
+If any zone fails its function, purity or recovery will be infeasible regardless of optimization.
+
+---
+
+## 4. MLL Isotherm — What the Parameters Mean
+
+The Modified Langmuir (MLL) isotherm is **competitive and nonlinear**:
+
+- `H` (Henry's constant): linear adsorption affinity at infinite dilution. Ratio H_GA/H_MA determines intrinsic selectivity.
+- `qm` (saturation capacity): maximum loading on the sorbent. Larger qm = more capacity.
+- `K` (Langmuir constant): nonlinearity coefficient. High K means strong curvature even at low concentrations.
+- `kapp` (apparent mass transfer coefficient): controls how fast equilibrium is approached in the column.
+
+Components compete for adsorption sites — increasing one component's concentration can desorb another. At the Kraton-feed concentrations (wt0 ≈ 0.3–0.4% for GA/MA), the system is near-dilute, so Henry's law is approximately valid but nonlinear effects still matter.
+
+---
+
+## 5. Switching Time and Cyclic Steady State
+
+The switching time `tstep` controls how far concentration wave fronts move per switch period. It must be matched to zone flow rates and column volumes:
+
+- Too short: fronts don't travel far enough — poor separation efficiency
+- Too long: fronts overshoot zone boundaries — cross-contamination
+
+The cyclic steady-state constraint (CSSC in the code) links the concentration profile at the end of one column's period to the start of the next. This is a hard periodicity constraint baked into the model — it is not optional.
+
+`tstep` interacts with flow rates because the wave velocity in each zone depends on both the interstitial velocity and the effective isotherm slope. The appropriate range of `tstep` for a given layout and flow regime is a simulation result, not a fixed prior.
+
+---
+
+## 6. Multi-Fidelity Discretization
+
+The DAE model is discretized in space (nfex finite elements, CENTRAL scheme) and time (nfet finite elements, ncp collocation points per element). Coarser grids:
+
+- Solve faster and require less memory
+- May miss fine-scale transport effects, especially near constraint boundaries
+- Generally preserve rank ordering between candidates, but absolute metric values differ from high-fidelity
+
+The fidelity ladder is: **low → medium → high**. Never jump directly from low to high — the warm-start from medium fidelity is necessary for numerical stability. The high-fidelity result is the only one suitable for final reporting.
+
+---
+
+## 7. Solver Status Interpretation
+
+| Status | Meaning | Action |
+|--------|---------|--------|
+| `optimal` / `ok` | Converged to local optimum | Check metrics for constraint satisfaction |
+| `infeasible` | IPOPT found no feasible point from this start | Try different initial point, or relax bounds temporarily |
+| `solver_error` | Numerical failure | May be bad initial point, extreme flows, or model issue — not proof of physics infeasibility |
+| `acceptable` | Converged to weaker tolerance | Treat as approximate; re-solve at tighter tolerance before accepting |
+| `maxIterations` | Iteration limit hit | Increase `max_iter`, or check if problem is near-infeasible |
+
+A `solver_error` means IPOPT could not find a solution from the given start — it does not mean the problem is infeasible. A different initial point, a lower-fidelity warm start, or looser tolerances may succeed.
+
+---
+
+## 8. Purity and Recovery — Exact Definitions
+
+These definitions are hard-coded in `metrics.py`. Do not substitute alternatives.
+
+- **Purity (MeOH-free)**: `(CE_GA + CE_MA) / (CE_GA + CE_MA + CE_Water)` — time-averaged extract concentrations, MeOH excluded from denominator
+- **Recovery GA**: fraction of GA entering in feed that exits in extract
+- **Recovery MA**: fraction of MA entering in feed that exits in extract
+- **Productivity**: `(CE_GA + CE_MA) × UE × area × eb` — volumetric throughput of target acids in extract stream
+
+The extract purity is on a MeOH-free basis because MeOH is the desorbent and its presence is expected — what matters is the acid/water separation.
+
+---
+
+## 9. Physical Hardware Constraints
+
+These bounds reflect the actual experimental hardware on which results will be validated:
+
+- `Fdes, Fex, Ffeed, Fraf ≤ 2.5 mL/min` (external pump maximum)
+- `F1 ≤ 5.0 mL/min` (internal recirculation, separate higher limit)
+- All flows must remain strictly positive
+- Total columns fixed at 8; each zone must have ≥ 1 column
+
+Violating these makes a result experimentally irreproducible even if the simulation converges.
+
+---
+
+## 10. What the Agents Should Discover, Not Be Told
+
+The following are **not** in this document because they are experimental findings that the agents must discover and validate:
+
+- Which `nc` layout performs best for this feed/isotherm system
+- Optimal ranges for `F1`, `Fdes`, `Fex`, `Ffeed`, `tstep`
+- How purity responds quantitatively to specific flow changes
+- Which zone allocation (Z1, Z2, Z3, Z4 column count) maximizes productivity
+- Coupling ratios between flow variables
+
+Evidence from simulation runs should be logged in `hypotheses.json` (`simulation_results[]`) and used to update hypothesis confidence. Do not treat any specific value range as "known good" unless it appears in a validated high-fidelity run logged there.

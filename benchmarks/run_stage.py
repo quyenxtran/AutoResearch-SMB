@@ -755,7 +755,117 @@ def extract_optimized_flows(m, inputs, run_name: str) -> FlowRates:
     )
 
 
-def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int]) -> Dict[str, object]:
+def extract_model_state(m, inputs) -> Dict[str, object]:
+    """Capture solved variable values from a reference-eval model.
+
+    Returns a dict of {variable_index: value} for C, Q, Cp, U, UF, UD, UE, UR,
+    tstep — everything needed to warm-start an optimization model with the same
+    NC layout at the same (or similar) fidelity.
+    """
+    state: Dict[str, object] = {}
+
+    # Concentration, solid-phase, and particle-phase profiles
+    c_vals = {}
+    q_vals = {}
+    cp_vals = {}
+    for idx in m.C:
+        v = m.C[idx].value
+        if v is not None:
+            c_vals[idx] = float(v)
+    for idx in m.Q:
+        v = m.Q[idx].value
+        if v is not None:
+            q_vals[idx] = float(v)
+    for idx in m.Cp:
+        v = m.Cp[idx].value
+        if v is not None:
+            cp_vals[idx] = float(v)
+    state["C"] = c_vals
+    state["Q"] = q_vals
+    state["Cp"] = cp_vals
+
+    # Flow velocities per column
+    u_vals = {}
+    for col in m.col:
+        v = m.U[col].value
+        if v is not None:
+            u_vals[col] = float(v)
+    state["U"] = u_vals
+
+    # Global flow velocities and switching time
+    state["UF"] = float(value(m.UF))
+    state["UD"] = float(value(m.UD))
+    state["UE"] = float(value(m.UE))
+    state["UR"] = float(value(m.UR))
+    state["tstep"] = float(value(m.tstep))
+
+    return state
+
+
+def apply_warm_start_state(m, state: Dict[str, object]) -> None:
+    """Initialize an optimization model's variables from a prior solved state.
+
+    Call this AFTER build_model + apply_discretization + add_optimization, but
+    BEFORE solve_model. Sets variable values (not bounds) so IPOPT starts from
+    the reference solution instead of a cold default initial point.
+    """
+    # Concentration, solid-phase, and particle-phase profiles
+    c_vals = state.get("C", {})
+    for idx, val in c_vals.items():
+        try:
+            m.C[idx].set_value(float(val))
+        except (KeyError, ValueError):
+            pass  # Index mismatch between fidelity levels — skip silently
+
+    q_vals = state.get("Q", {})
+    for idx, val in q_vals.items():
+        try:
+            m.Q[idx].set_value(float(val))
+        except (KeyError, ValueError):
+            pass
+
+    cp_vals = state.get("Cp", {})
+    for idx, val in cp_vals.items():
+        try:
+            m.Cp[idx].set_value(float(val))
+        except (KeyError, ValueError):
+            pass
+
+    # Flow velocities per column
+    u_vals = state.get("U", {})
+    for col, val in u_vals.items():
+        try:
+            m.U[col].set_value(float(val))
+        except (KeyError, ValueError):
+            pass
+
+    # Global flow velocities and switching time — set value (not fix)
+    for attr in ("UF", "UD", "UE", "UR", "tstep"):
+        val = state.get(attr)
+        if val is not None:
+            try:
+                getattr(m, attr).set_value(float(val))
+            except (AttributeError, ValueError):
+                pass
+
+
+def _ensure_ipopt_logfile(solver_options: Dict[str, object], args: argparse.Namespace) -> None:
+    """Ensure IPOPT always writes a log file with full iteration detail.
+
+    If the executive live monitor already set ``output_file``, this is a no-op.
+    Otherwise, create a log file in the artifact directory so PACE users can
+    ``tail -f`` the iteration table while the solver runs.
+    """
+    if "output_file" in solver_options:
+        return  # Already configured by the monitor
+    log_dir = Path(args.artifact_dir) / "ipopt_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"ipopt_{args.run_name}.log"
+    solver_options["output_file"] = str(log_path)
+    solver_options.setdefault("file_print_level", 5)
+
+
+def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int], *, return_model_state: bool = False) -> Dict[str, object]:
     from src import (  # type: ignore
         apply_discretization,
         build_inputs,
@@ -772,6 +882,7 @@ def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int]) -> Dict[str,
         solver_options["output_file"] = str(monitor_log_path)
         solver_options.setdefault("file_print_level", 5)
         solver_options.setdefault("print_level", 5)
+    _ensure_ipopt_logfile(solver_options, args)
 
     start_wall = time.perf_counter()
     start_cpu = time.process_time()
@@ -910,7 +1021,7 @@ def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int]) -> Dict[str,
         and slacks["F4_positive"] > 0.0
         and slacks["nc_sum"] >= 0.0
     )
-    return {
+    payload = {
         "status": "ok",
         "stage": args.stage,
         "run_name": args.run_name,
@@ -941,9 +1052,21 @@ def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int]) -> Dict[str,
             "cpu_hours_accounted": wall_seconds * cpus_used / 3600.0,
         },
     }
+    # Capture solved model state for warm-starting downstream optimization
+    if return_model_state:
+        try:
+            payload["_model_state"] = extract_model_state(m, inputs)
+        except Exception:
+            pass  # Non-critical — optimization can still run without warm-start
+    return payload
 
 
-def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Dict[str, object]:
+def evaluate_optimized_layout(
+    args: argparse.Namespace,
+    nc: Sequence[int],
+    *,
+    warm_start_state: Dict[str, object] | None = None,
+) -> Dict[str, object]:
     from src import (  # type: ignore
         add_optimization,
         apply_discretization,
@@ -961,6 +1084,7 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
         solver_options["output_file"] = str(monitor_log_path)
         solver_options.setdefault("file_print_level", 5)
         solver_options.setdefault("print_level", 5)
+    _ensure_ipopt_logfile(solver_options, args)
     tstep_bounds = parse_bounds(args.tstep_bounds)
     ffeed_bounds = parse_bounds(args.ffeed_bounds)
     fdes_bounds = parse_bounds(args.fdes_bounds)
@@ -991,10 +1115,48 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
         f1_min=args.f1_min,
         f1_max=args.f1_max,
     )
+
+    # Apply warm-start state from a prior reference evaluation if available.
+    # This initializes variable values (C, Q, Cp, U, tstep) from a solved
+    # reference-eval run, giving IPOPT a much better starting point than the
+    # cold default.  The warm-start state is optional — if missing or if
+    # fidelity differs, apply_warm_start_state silently skips mismatched indices.
+    if warm_start_state is not None:
+        try:
+            apply_warm_start_state(m, warm_start_state)
+        except Exception:
+            pass  # Non-critical — proceed with default initialization
+
+    # Two-phase solve: Phase 1 finds a feasible point, Phase 2 optimizes from it.
+    two_phase = bool(int(os.environ.get("SMB_TWO_PHASE_SOLVE", "1")))
     solve_exc: Exception | None = None
     results = None
+    phase1_status = None
     try:
-        results = solve_model(m, solver_name=solver_name, options=solver_options, tee=args.tee)
+        if two_phase:
+            from src import add_feasibility_objective, restore_productivity_objective  # type: ignore
+            from src import feasibility_restoration_options, warm_start_options  # type: ignore
+
+            # Phase 1: minimize constraint violation
+            add_feasibility_objective(m, inputs)
+            phase1_options = dict(solver_options)
+            phase1_options.update(feasibility_restoration_options())
+            if monitor_log_path is not None:
+                phase1_options["output_file"] = str(monitor_log_path)
+            try:
+                phase1_results = solve_model(m, solver_name=solver_name, options=phase1_options, tee=args.tee)
+                phase1_status = str(phase1_results.solver.termination_condition) if phase1_results else "unknown"
+            except Exception:
+                phase1_status = "phase1_error"
+
+            # Phase 2: restore productivity objective with warm-start
+            restore_productivity_objective(m)
+            phase2_options = dict(solver_options)
+            if phase1_status not in ("phase1_error",):
+                phase2_options.update(warm_start_options())
+            results = solve_model(m, solver_name=solver_name, options=phase2_options, tee=args.tee)
+        else:
+            results = solve_model(m, solver_name=solver_name, options=solver_options, tee=args.tee)
     except Exception as exc:
         solve_exc = exc
     finally:
@@ -1198,6 +1360,9 @@ def evaluate_optimized_layout(args: argparse.Namespace, nc: Sequence[int]) -> Di
         "solver": {
             "solver_name": solver_name,
             "solver_options": solver_options,
+            "two_phase_solve": two_phase,
+            "phase1_status": phase1_status,
+            "warm_started_from_reference": warm_start_state is not None,
             **solver_summary,
         },
         "executive_live_monitor": monitor_snapshot,
@@ -1385,6 +1550,35 @@ def run_flow_screen(args: argparse.Namespace) -> Dict[str, object]:
     }
 
 
+def _pick_best_reference_state(
+    ref_results: List[Dict[str, object]],
+) -> Dict[str, object] | None:
+    """Select the best reference-eval model state for warm-starting optimization.
+
+    Preference order:
+    1. Feasible result with highest J_validated
+    2. Any result with a captured _model_state (even if infeasible — still a
+       better starting point than cold default)
+    """
+    feasible_with_state = [
+        r for r in ref_results
+        if r.get("feasible") and r.get("_model_state") is not None
+    ]
+    if feasible_with_state:
+        best = max(
+            feasible_with_state,
+            key=lambda r: float(r.get("J_validated") or 0.0),
+        )
+        return best["_model_state"]  # type: ignore[return-value]
+
+    # Fall back to any result with a model state
+    with_state = [r for r in ref_results if r.get("_model_state") is not None]
+    if with_state:
+        return with_state[0]["_model_state"]  # type: ignore[return-value]
+
+    return None
+
+
 def run_optimize_layouts(args: argparse.Namespace) -> Dict[str, object]:
     nc_library = parse_nc_library(args.nc_library)
     tstep_bounds = parse_bounds(args.tstep_bounds)
@@ -1395,7 +1589,87 @@ def run_optimize_layouts(args: argparse.Namespace) -> Dict[str, object]:
     f1_bounds = parse_bounds(args.f1_bounds)
     seed_library = parse_seed_library(args.seed_library)
     results: List[Dict[str, object]] = []
+
+    # Convergence tracking for MINLP baseline comparison
+    convergence_log: List[Dict[str, object]] = []
+    best_feasible_j: float | None = None
+    best_feasible_run: str | None = None
+    best_feasible_prod: float | None = None
+    cumulative_wall_s = 0.0
+    sim_number = 0
+
+    # Whether to run reference evals before optimization (env-configurable)
+    run_ref_gate = bool(int(os.environ.get("SMB_REFERENCE_GATE", "1")))
+    # How many seeds to use for the reference-eval gate (default: 3 — the
+    # first 3 NOTEBOOK_SEEDS cover the main operating regions)
+    ref_gate_max_seeds = int(os.environ.get("SMB_REFERENCE_GATE_MAX_SEEDS", "3"))
+
     for nc in nc_library:
+        # --- Reference-eval gate: run fixed-flow solves first to find a good
+        # warm-start point for optimization.  This is much cheaper than a full
+        # optimization run and gives IPOPT a physically reasonable starting
+        # point instead of the cold default initial guess.
+        warm_start_state: Dict[str, object] | None = None
+        ref_gate_results: List[Dict[str, object]] = []
+        best_ref_seed_name: str | None = None
+
+        if run_ref_gate:
+            ref_seeds = seed_library[:ref_gate_max_seeds]
+            for seed in ref_seeds:
+                ref_args = apply_seed_to_args(
+                    args,
+                    seed,
+                    tstep_bounds=tstep_bounds,
+                    ffeed_bounds=ffeed_bounds,
+                    fdes_bounds=fdes_bounds,
+                    fex_bounds=fex_bounds,
+                    fraf_bounds=fraf_bounds,
+                    f1_bounds=f1_bounds,
+                )
+                ref_args.run_name = f"{args.run_name}_refgate_nc_{'-'.join(str(v) for v in nc)}_{ref_args.seed_name}"
+                try:
+                    ref_result = evaluate_candidate(ref_args, nc, return_model_state=True)
+                    ref_gate_results.append(ref_result)
+                except Exception:
+                    pass  # Reference gate failure is non-fatal
+
+                # Count reference evals in convergence tracking too
+                sim_number += 1
+                timing = ref_result.get("timing") or {} if ref_gate_results else {}
+                cumulative_wall_s += float(timing.get("wall_seconds", 0.0) if isinstance(timing, dict) else 0.0)
+                if ref_gate_results and ref_gate_results[-1].get("feasible"):
+                    j_val = ref_gate_results[-1].get("J_validated")
+                    if j_val is not None:
+                        j_float = float(j_val)
+                        if best_feasible_j is None or j_float > best_feasible_j:
+                            best_feasible_j = j_float
+                            best_feasible_run = str(ref_gate_results[-1].get("run_name", ""))
+                            ref_metrics = ref_gate_results[-1].get("metrics") or {}
+                            if isinstance(ref_metrics, dict):
+                                best_feasible_prod = float(ref_metrics.get("productivity_ex_ga_ma", 0.0))
+                convergence_log.append({
+                    "sim_number": sim_number,
+                    "candidate_run_name": ref_args.run_name,
+                    "best_feasible_j": best_feasible_j,
+                    "best_feasible_productivity": best_feasible_prod,
+                    "best_feasible_run_name": best_feasible_run,
+                    "cumulative_wall_seconds": cumulative_wall_s,
+                    "nc": list(nc),
+                    "seed_name": str(seed.get("name", "")),
+                    "status": str(ref_gate_results[-1].get("status", "error")) if ref_gate_results else "error",
+                    "feasible": bool(ref_gate_results[-1].get("feasible")) if ref_gate_results else False,
+                    "phase": "reference_gate",
+                })
+
+            warm_start_state = _pick_best_reference_state(ref_gate_results)
+            if warm_start_state is not None:
+                # Find which seed produced the best state
+                for rr in ref_gate_results:
+                    if rr.get("_model_state") is warm_start_state:
+                        best_ref_seed_name = str(rr.get("run_name", ""))
+                        break
+
+        # --- Optimization runs: use warm-start from best reference eval
         for seed in seed_library:
             candidate_args = apply_seed_to_args(
                 args,
@@ -1409,20 +1683,53 @@ def run_optimize_layouts(args: argparse.Namespace) -> Dict[str, object]:
             )
             candidate_args.run_name = f"{args.run_name}_nc_{'-'.join(str(v) for v in nc)}_{candidate_args.seed_name}"
             try:
-                results.append(evaluate_optimized_layout(candidate_args, nc))
-            except Exception as exc:
-                results.append(
-                    {
-                        "status": "error",
-                        "stage": args.stage,
-                        "run_name": candidate_args.run_name,
-                        "nc": list(nc),
-                        "seed_name": candidate_args.seed_name,
-                        "seed_flow_original": candidate_args.seed_flow_original,
-                        "error": str(exc),
-                        "traceback": traceback.format_exc(),
-                    }
+                result = evaluate_optimized_layout(
+                    candidate_args, nc, warm_start_state=warm_start_state,
                 )
+                if best_ref_seed_name is not None:
+                    result["warm_start_source"] = best_ref_seed_name
+                results.append(result)
+            except Exception as exc:
+                result = {
+                    "status": "error",
+                    "stage": args.stage,
+                    "run_name": candidate_args.run_name,
+                    "nc": list(nc),
+                    "seed_name": candidate_args.seed_name,
+                    "seed_flow_original": candidate_args.seed_flow_original,
+                    "error": str(exc),
+                    "traceback": traceback.format_exc(),
+                }
+                results.append(result)
+
+            # Track convergence
+            sim_number += 1
+            timing = result.get("timing") or {}
+            cumulative_wall_s += float(timing.get("wall_seconds", 0.0) if isinstance(timing, dict) else 0.0)
+            if result.get("feasible"):
+                j_val = result.get("J_validated")
+                if j_val is not None:
+                    j_float = float(j_val)
+                    if best_feasible_j is None or j_float > best_feasible_j:
+                        best_feasible_j = j_float
+                        best_feasible_run = str(result.get("run_name", ""))
+                        metrics = result.get("metrics") or {}
+                        if isinstance(metrics, dict):
+                            best_feasible_prod = float(metrics.get("productivity_ex_ga_ma", 0.0))
+            convergence_log.append({
+                "sim_number": sim_number,
+                "candidate_run_name": str(result.get("run_name", "")),
+                "best_feasible_j": best_feasible_j,
+                "best_feasible_productivity": best_feasible_prod,
+                "best_feasible_run_name": best_feasible_run,
+                "cumulative_wall_seconds": cumulative_wall_s,
+                "nc": list(nc),
+                "seed_name": str(seed.get("name", "")),
+                "status": str(result.get("status", "")),
+                "feasible": bool(result.get("feasible")),
+                "phase": "optimization",
+            })
+
     successful = [item for item in results if item.get("status") == "ok"]
     ranked = rank_results(successful) if successful else []
     return {
@@ -1430,9 +1737,12 @@ def run_optimize_layouts(args: argparse.Namespace) -> Dict[str, object]:
         "stage": args.stage,
         "nc_library": [list(nc) for nc in nc_library],
         "seed_library": seed_library,
+        "reference_gate_enabled": run_ref_gate,
+        "reference_gate_max_seeds": ref_gate_max_seeds,
         "results": results,
         "ranked_results": ranked,
         "best_result": ranked[0] if ranked else None,
+        "convergence_log": convergence_log,
     }
 
 

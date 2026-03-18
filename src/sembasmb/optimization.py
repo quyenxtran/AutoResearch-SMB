@@ -1,4 +1,4 @@
-from pyomo.environ import Constraint, Objective, Var, maximize
+from pyomo.environ import Constraint, Objective, Var, maximize, minimize, NonNegativeReals
 
 from .config import SMBInputs
 
@@ -134,5 +134,96 @@ def add_optimization(
             m.U[1].setub(u1_ub)
 
     m.obj = Objective(expr=ce_acid * m.UE * inputs.area * inputs.eb, sense=maximize)
+
+    return m
+
+
+def add_feasibility_objective(m, inputs: SMBInputs):
+    """Replace the productivity objective with a feasibility objective.
+
+    Adds slack variables to the hard constraints (recovery, purity) and
+    minimizes total slack. After solving Phase 1, if total slack is near zero,
+    the model is at a feasible point suitable for warm-starting Phase 2
+    (productivity maximization).
+
+    Call this INSTEAD of add_optimization() for Phase 1, or call it AFTER
+    add_optimization() to temporarily swap the objective.
+    """
+    try:
+        ga_idx = inputs.comps.index('GA') + 1
+        ma_idx = inputs.comps.index('MA') + 1
+    except ValueError as exc:
+        raise ValueError("inputs.comps must include 'GA' and 'MA'") from exc
+
+    # Add slack variables for each hard constraint
+    m.slack_recovery_ga = Var(within=NonNegativeReals, initialize=0.0)
+    m.slack_recovery_ma = Var(within=NonNegativeReals, initialize=0.0)
+    m.slack_purity = Var(within=NonNegativeReals, initialize=0.0)
+
+    # Relax the hard constraints by adding slack
+    cf_ga = inputs.dict_CF[ga_idx]
+    cf_ma = inputs.dict_CF[ma_idx]
+
+    # Deactivate original hard constraints if they exist
+    for cname in ('RecoveryExGA', 'RecoveryExMA', 'PurityExMeohFree'):
+        if hasattr(m, cname):
+            getattr(m, cname).deactivate()
+
+    # Add relaxed versions
+    m.RecoveryExGA_relaxed = Constraint(
+        expr=(m.CE[ga_idx] * m.UE) / (cf_ga * m.UF) + m.slack_recovery_ga >= 0.75
+    )
+    m.RecoveryExMA_relaxed = Constraint(
+        expr=(m.CE[ma_idx] * m.UE) / (cf_ma * m.UF) + m.slack_recovery_ma >= 0.75
+    )
+
+    meoh_idx = inputs.comps.index('MeOH') + 1
+    ce_acid = sum(m.CE[i] for i in m.acid)
+    m.PurityExMeohFree_relaxed = Constraint(
+        expr=ce_acid + m.slack_purity >= 0.60 * (sum(m.CE[i] for i in m.comp) - m.CE[meoh_idx])
+    )
+
+    # Deactivate productivity objective
+    if hasattr(m, 'obj'):
+        m.obj.deactivate()
+
+    # Minimize total slack (= find the most feasible point)
+    m.feasibility_obj = Objective(
+        expr=m.slack_recovery_ga + m.slack_recovery_ma + m.slack_purity,
+        sense=minimize,
+    )
+
+    return m
+
+
+def restore_productivity_objective(m):
+    """After Phase 1 feasibility solve, restore the productivity objective for Phase 2.
+
+    Fixes slack variables to zero, reactivates original constraints, and
+    switches back to the productivity objective.
+    """
+    # Fix slacks to zero — we're now demanding true feasibility
+    if hasattr(m, 'slack_recovery_ga'):
+        m.slack_recovery_ga.fix(0.0)
+    if hasattr(m, 'slack_recovery_ma'):
+        m.slack_recovery_ma.fix(0.0)
+    if hasattr(m, 'slack_purity'):
+        m.slack_purity.fix(0.0)
+
+    # Deactivate relaxed constraints
+    for cname in ('RecoveryExGA_relaxed', 'RecoveryExMA_relaxed', 'PurityExMeohFree_relaxed'):
+        if hasattr(m, cname):
+            getattr(m, cname).deactivate()
+
+    # Reactivate original hard constraints
+    for cname in ('RecoveryExGA', 'RecoveryExMA', 'PurityExMeohFree'):
+        if hasattr(m, cname):
+            getattr(m, cname).activate()
+
+    # Swap objectives
+    if hasattr(m, 'feasibility_obj'):
+        m.feasibility_obj.deactivate()
+    if hasattr(m, 'obj'):
+        m.obj.activate()
 
     return m

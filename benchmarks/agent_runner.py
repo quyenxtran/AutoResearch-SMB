@@ -268,6 +268,31 @@ def open_sqlite_db(path: str) -> sqlite3.Connection:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sim_feasible ON simulation_results(feasible)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sim_jval ON simulation_results(j_validated DESC)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sim_violation ON simulation_results(normalized_total_violation ASC)")
+
+    # Convergence tracking table: records best-so-far after each simulation for sample efficiency comparison.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS convergence_tracker (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            agent_run_name TEXT NOT NULL,
+            method TEXT NOT NULL,
+            sim_number INTEGER NOT NULL,
+            candidate_run_name TEXT,
+            best_feasible_j REAL,
+            best_feasible_productivity REAL,
+            best_feasible_run_name TEXT,
+            cumulative_wall_seconds REAL,
+            cumulative_cpu_hours REAL,
+            total_feasible INTEGER,
+            total_runs INTEGER,
+            acquisition_type TEXT,
+            nc_layouts_tested INTEGER
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_method ON convergence_tracker(method, agent_run_name)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_sim ON convergence_tracker(sim_number)")
     conn.commit()
     return conn
 
@@ -356,6 +381,224 @@ def persist_result_to_sqlite(conn: sqlite3.Connection, agent_run_name: str, phas
         ),
     )
     conn.commit()
+
+
+def record_convergence_snapshot(
+    conn: sqlite3.Connection,
+    agent_run_name: str,
+    method: str,
+    sim_number: int,
+    result: Dict[str, object],
+    cumulative_wall_seconds: float,
+    cumulative_cpu_hours: float,
+    acquisition_type: str = "",
+) -> None:
+    """Record a convergence tracking point after each simulation.
+
+    This creates the data needed to plot best-feasible-J vs simulation-count
+    for agent vs MINLP comparison.
+    """
+    # Query the current best feasible result across all runs for this method
+    best_row = conn.execute(
+        """
+        SELECT j_validated, productivity, candidate_run_name
+        FROM simulation_results
+        WHERE agent_run_name = ? AND feasible = 1 AND j_validated IS NOT NULL
+        ORDER BY j_validated DESC LIMIT 1
+        """,
+        (agent_run_name,),
+    ).fetchone()
+
+    best_j = float(best_row[0]) if best_row else None
+    best_prod = float(best_row[1]) if best_row else None
+    best_run = str(best_row[2]) if best_row else None
+
+    counts = conn.execute(
+        """
+        SELECT COUNT(*) AS total, COALESCE(SUM(CASE WHEN feasible=1 THEN 1 ELSE 0 END), 0) AS feasible_count,
+               COUNT(DISTINCT nc) AS nc_count
+        FROM simulation_results
+        WHERE agent_run_name = ?
+        """,
+        (agent_run_name,),
+    ).fetchone()
+
+    conn.execute(
+        """
+        INSERT INTO convergence_tracker (
+            agent_run_name, method, sim_number, candidate_run_name,
+            best_feasible_j, best_feasible_productivity, best_feasible_run_name,
+            cumulative_wall_seconds, cumulative_cpu_hours,
+            total_feasible, total_runs, acquisition_type, nc_layouts_tested
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            agent_run_name,
+            method,
+            sim_number,
+            str(result.get("run_name", "")),
+            best_j,
+            best_prod,
+            best_run,
+            cumulative_wall_seconds,
+            cumulative_cpu_hours,
+            int(counts[1]) if counts else 0,
+            int(counts[0]) if counts else 0,
+            acquisition_type or "",
+            int(counts[2]) if counts else 0,
+        ),
+    )
+    conn.commit()
+
+
+def sqlite_convergence_context(conn: sqlite3.Connection, agent_run_name: str) -> str:
+    """Build a convergence summary for the agent to assess its own progress."""
+    rows = conn.execute(
+        """
+        SELECT sim_number, best_feasible_j, best_feasible_productivity,
+               best_feasible_run_name, total_feasible, total_runs,
+               nc_layouts_tested, acquisition_type, cumulative_wall_seconds
+        FROM convergence_tracker
+        WHERE agent_run_name = ?
+        ORDER BY sim_number ASC
+        """,
+        (agent_run_name,),
+    ).fetchall()
+    if not rows:
+        return "Convergence tracker: no data yet."
+
+    lines = ["Convergence tracker (best feasible J after each simulation):"]
+    last_j = None
+    stagnation_count = 0
+    for row in rows:
+        sim_num, best_j, best_prod, best_run, n_feasible, n_total, n_nc, acq_type, cum_wall = row
+        improved = ""
+        if best_j is not None:
+            if last_j is None or best_j > last_j:
+                improved = " [NEW BEST]"
+                stagnation_count = 0
+                last_j = best_j
+            else:
+                stagnation_count += 1
+        lines.append(
+            f"- sim={sim_num} best_J={best_j} best_prod={best_prod} best_run={best_run} "
+            f"feasible={n_feasible}/{n_total} nc_tested={n_nc} type={acq_type} "
+            f"wall_s={cum_wall:.1f}{improved}"
+        )
+
+    # Summary statistics
+    total_explore = sum(1 for r in rows if r[7] == "EXPLORE")
+    total_exploit = sum(1 for r in rows if r[7] == "EXPLOIT")
+    total_verify = sum(1 for r in rows if r[7] == "VERIFY")
+    total_other = len(rows) - total_explore - total_exploit - total_verify
+    lines.append(
+        f"Acquisition balance: EXPLORE={total_explore} EXPLOIT={total_exploit} "
+        f"VERIFY={total_verify} other={total_other}"
+    )
+    lines.append(f"Simulations since last improvement: {stagnation_count}")
+    return "\n".join(lines)
+
+
+def sqlite_targeted_query(conn: sqlite3.Connection, query_type: str, **kwargs: object) -> str:
+    """Run targeted queries against the simulation history for deeper analysis."""
+    lines: List[str] = []
+
+    if query_type == "nc_detail":
+        nc_val = str(kwargs.get("nc", ""))
+        rows = conn.execute(
+            """
+            SELECT candidate_run_name, seed_name, status, feasible, j_validated, productivity,
+                   purity, recovery_ga, recovery_ma, normalized_total_violation,
+                   ffeed, f1, fdes, fex, fraf, tstep, termination_condition
+            FROM simulation_results WHERE nc = ?
+            ORDER BY j_validated DESC, productivity DESC, id DESC
+            """,
+            (nc_val,),
+        ).fetchall()
+        lines.append(f"All runs for nc={nc_val} ({len(rows)} total):")
+        for row in rows:
+            lines.append(
+                f"  {row[0]} seed={row[1]} status={row[2]} feasible={bool(row[3])} J={row[4]} prod={row[5]} "
+                f"purity={row[6]} rGA={row[7]} rMA={row[8]} viol={row[9]} "
+                f"flow(Ffeed={row[10]},F1={row[11]},Fdes={row[12]},Fex={row[13]},Fraf={row[14]},tstep={row[15]}) "
+                f"term={row[16]}"
+            )
+
+    elif query_type == "flow_region":
+        min_ffeed = float(kwargs.get("min_ffeed", 0.0))
+        max_ffeed = float(kwargs.get("max_ffeed", 99.0))
+        rows = conn.execute(
+            """
+            SELECT candidate_run_name, nc, feasible, j_validated, productivity, purity,
+                   recovery_ga, recovery_ma, ffeed, f1, fdes, fex, tstep
+            FROM simulation_results
+            WHERE ffeed >= ? AND ffeed <= ?
+            ORDER BY j_validated DESC, productivity DESC
+            LIMIT 20
+            """,
+            (min_ffeed, max_ffeed),
+        ).fetchall()
+        lines.append(f"Runs with Ffeed in [{min_ffeed}, {max_ffeed}] ({len(rows)} shown):")
+        for row in rows:
+            lines.append(
+                f"  {row[0]} nc={row[1]} feasible={bool(row[2])} J={row[3]} prod={row[4]} "
+                f"purity={row[5]} rGA={row[6]} rMA={row[7]} "
+                f"Ffeed={row[8]} F1={row[9]} Fdes={row[10]} Fex={row[11]} tstep={row[12]}"
+            )
+
+    elif query_type == "binding_constraint":
+        rows = conn.execute(
+            """
+            SELECT candidate_run_name, nc, purity, recovery_ga, recovery_ma,
+                   normalized_total_violation, productivity, feasible
+            FROM simulation_results
+            WHERE feasible = 0 AND normalized_total_violation IS NOT NULL
+            ORDER BY normalized_total_violation ASC
+            LIMIT 20
+            """,
+        ).fetchall()
+        lines.append(f"Near-feasible runs sorted by violation ({len(rows)} shown):")
+        for row in rows:
+            purity = row[2] or 0.0
+            rga = row[3] or 0.0
+            rma = row[4] or 0.0
+            # Identify which constraint is most binding
+            bottleneck = []
+            if purity < 0.60:
+                bottleneck.append(f"purity({purity:.4f}<0.60)")
+            if rga < 0.75:
+                bottleneck.append(f"rGA({rga:.4f}<0.75)")
+            if rma < 0.75:
+                bottleneck.append(f"rMA({rma:.4f}<0.75)")
+            lines.append(
+                f"  {row[0]} nc={row[1]} viol={row[5]} prod={row[6]} "
+                f"binding=[{', '.join(bottleneck) if bottleneck else 'unknown'}]"
+            )
+
+    elif query_type == "improvement_history":
+        rows = conn.execute(
+            """
+            SELECT id, candidate_run_name, nc, feasible, j_validated, productivity,
+                   purity, wall_seconds
+            FROM simulation_results
+            ORDER BY id ASC
+            """,
+        ).fetchall()
+        lines.append("Improvement history (cumulative best J over time):")
+        best_j: Optional[float] = None
+        for row in rows:
+            j = row[4]
+            if row[3] and j is not None:
+                if best_j is None or j > best_j:
+                    best_j = j
+                    lines.append(
+                        f"  sim={row[0]} {row[1]} nc={row[2]} J={j} prod={row[5]} purity={row[6]} [IMPROVED]"
+                    )
+
+    else:
+        lines.append(f"Unknown query type: {query_type}")
+
+    return "\n".join(lines) if lines else "No results."
 
 
 def sqlite_history_context(conn: sqlite3.Connection, max_feasible: int = 5, max_near: int = 5, max_recent: int = 6) -> str:
@@ -549,14 +792,13 @@ def nc_key(nc: Sequence[int]) -> str:
 
 
 def nc_prior_score(nc: Sequence[int]) -> float:
-    # Prior around the Kraton reference layout (1,2,3,2), with penalties for extreme asymmetry.
-    ref = (1, 2, 3, 2)
+    # Neutral structural prior: mild penalty for extreme column count asymmetry only.
+    # Does NOT bias toward any specific layout (e.g., reference (1,2,3,2)).
+    # The only structural preference is against layouts where one zone has all 8 columns
+    # (physically degenerate) or where asymmetry is so extreme the zone functions break down.
     vals = [int(v) for v in nc]
-    dist_ref = sum(abs(vals[i] - ref[i]) for i in range(4))
-    singleton_count = sum(1 for v in vals if v == 1)
     asymmetry = max(vals) - min(vals)
-    zone23_target_penalty = abs((vals[1] + vals[2]) - (ref[1] + ref[2]))
-    return 100.0 - 4.0 * dist_ref - 5.0 * singleton_count - 1.5 * asymmetry - 2.0 * zone23_target_penalty
+    return 100.0 - 1.5 * asymmetry
 
 
 def sqlite_total_records_from_excerpt(text: str) -> int:
@@ -742,10 +984,10 @@ def nc_strategy_board(conn: sqlite3.Connection, nc_library: Sequence[Sequence[in
     lines = [
         f"NC strategy board ({len(unique_layouts)} layouts in current library):",
         "Scientific screening rubric:",
-        "- prioritize layouts near reference (1,2,3,2) unless evidence says otherwise",
+        "- rank by observed evidence: feasibility, J_validated, productivity, violation; no prior layout preference",
         "- penalize repeated solver_error histories and high average walltime",
-        "- favor layouts with stronger zone-2/zone-3 capacity and avoid extreme single-column fragmentation unless diagnostic",
-        "Ranked layouts (score combines prior + SQLite evidence):",
+        "- mild penalty for extreme zone asymmetry (one zone with many more columns than others); no zone count targets assumed",
+        "Ranked layouts (score combines structural symmetry penalty + SQLite evidence):",
     ]
     for idx, (score, nc, s) in enumerate(ranked, start=1):
         best_violation = "" if s["best_violation"] == float("inf") else f"{s['best_violation']:.6g}"
@@ -1066,6 +1308,79 @@ def read_doc_excerpt(path: str, max_chars: int = 4000) -> str:
     return p.read_text(encoding="utf-8")[:max_chars]
 
 
+def build_heuristics_context(max_chars: int = 4000) -> str:
+    """Build a compact summary of hypotheses.json and failures.json for agent context.
+
+    This gives the agent access to accumulated heuristics so it can make
+    informed decisions grounded in prior knowledge, not just raw data.
+    """
+    lines: List[str] = []
+
+    # --- Hypotheses summary ---
+    hyp_path = REPO_ROOT / "agents" / "hypotheses.json"
+    if hyp_path.exists():
+        try:
+            hyp_data = json.loads(hyp_path.read_text(encoding="utf-8"))
+            hypotheses = hyp_data.get("hypotheses", [])
+            lines.append(f"HYPOTHESES ({len(hypotheses)} total):")
+            for h in hypotheses:
+                hid = h.get("id", "?")
+                title = h.get("title", "")
+                status = h.get("status", "unknown")
+                confidence = h.get("confidence", "unknown")
+                n_results = len(h.get("simulation_results", []))
+                statement = h.get("statement", "")[:120]
+                lines.append(
+                    f"- {hid}: [{status}/{confidence}] {title} ({n_results} results)"
+                )
+                lines.append(f"  claim: {statement}")
+                # Show latest result verdict if any
+                results = h.get("simulation_results", [])
+                for r in results[-2:]:
+                    if r.get("run_name"):
+                        lines.append(
+                            f"  last_evidence: run={r.get('run_name')} verdict={r.get('verdict')} "
+                            f"notes={str(r.get('notes', ''))[:80]}"
+                        )
+        except (json.JSONDecodeError, KeyError):
+            lines.append("HYPOTHESES: failed to parse hypotheses.json")
+    else:
+        lines.append("HYPOTHESES: hypotheses.json not found")
+
+    lines.append("")
+
+    # --- Failures summary ---
+    fail_path = REPO_ROOT / "agents" / "failures.json"
+    if fail_path.exists():
+        try:
+            fail_data = json.loads(fail_path.read_text(encoding="utf-8"))
+            failures = fail_data.get("failures", [])
+            lines.append(f"FAILURE MODES ({len(failures)} known):")
+            for f_item in failures:
+                fid = f_item.get("id", "?")
+                title = f_item.get("title", "")
+                severity = f_item.get("severity", "unknown")
+                n_occurrences = len(f_item.get("occurrences", []))
+                symptoms = f_item.get("symptoms", [])
+                symptom_text = symptoms[0][:80] if symptoms else ""
+                lines.append(
+                    f"- {fid}: [{severity}] {title} ({n_occurrences} occurrences)"
+                )
+                if symptom_text:
+                    lines.append(f"  symptom: {symptom_text}")
+                # Show prevention hint
+                prevention = f_item.get("prevention", [])
+                if prevention:
+                    lines.append(f"  prevent: {prevention[0][:80]}")
+        except (json.JSONDecodeError, KeyError):
+            lines.append("FAILURE MODES: failed to parse failures.json")
+    else:
+        lines.append("FAILURE MODES: failures.json not found")
+
+    result = "\n".join(lines)
+    return result[:max_chars]
+
+
 def utc_now_text() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
@@ -1098,12 +1413,12 @@ def read_file_or_missing(path: Path) -> str:
 
 
 def build_codebase_context() -> Dict[str, object]:
-    optimization_file = REPO_ROOT / "SembaSMB" / "src" / "smb_optimization.py"
-    model_file = REPO_ROOT / "SembaSMB" / "src" / "smb_model.py"
-    metrics_file = REPO_ROOT / "SembaSMB" / "src" / "smb_metrics.py"
+    optimization_file = REPO_ROOT / "src" / "sembasmb" / "optimization.py"
+    model_file = REPO_ROOT / "src" / "sembasmb" / "model.py"
+    metrics_file = REPO_ROOT / "src" / "sembasmb" / "metrics.py"
     run_stage_file = REPO_ROOT / "benchmarks" / "run_stage.py"
-    config_file = REPO_ROOT / "SembaSMB" / "src" / "smb_config.py"
-    solver_file = REPO_ROOT / "SembaSMB" / "src" / "smb_solver.py"
+    config_file = REPO_ROOT / "src" / "sembasmb" / "config.py"
+    solver_file = REPO_ROOT / "src" / "sembasmb" / "solver.py"
 
     optimization_text = read_file_or_missing(optimization_file)
     model_text = read_file_or_missing(model_file)
@@ -2316,6 +2631,8 @@ def scientist_a_pick(
     sqlite_context_excerpt: str,
     budget_used: float,
     iteration: int,
+    heuristics_context: str = "",
+    convergence_context: str = "",
 ) -> Tuple[int, Dict[str, object]]:
     remaining = [task for task in candidate_tasks if (tuple(task["nc"]), str(task["seed_name"])) not in tried]
     shortlist = remaining[: min(len(remaining), 8)]
@@ -2331,10 +2648,10 @@ def scientist_a_pick(
             f"""
             You are Scientist_A for an SMB optimization benchmark.
             Think aggressively and evidence-first. Do not give generic plans.
-            Every proposal must reference concrete signals from at least one of:
-            SQLite history, research log tail, compute context, or constraint context.
+            Every proposal must be triple-grounded: DATA (SQLite history, convergence tracker) + PHYSICS (zone theory, mass balance) + HEURISTICS (hypotheses.json, failures.json patterns).
             Before choosing a new experiment, you must compare it against previous results (at minimum: current best and one recent failed run).
             If evidence is weak, propose a diagnostic run and state why.
+            Each simulation is expensive. Your competitive advantage over brute-force MINLP is choosing the HIGHEST-VALUE next experiment. Justify why this candidate is the most informative use of the next solver call.
 
             Objective summary:
             {objectives_excerpt}
@@ -2350,6 +2667,12 @@ def scientist_a_pick(
 
             Simulation objective/constraint context:
             {constraint_context_excerpt}
+
+            Accumulated heuristics (hypotheses and known failure modes):
+            {heuristics_context}
+
+            Convergence progress:
+            {convergence_context}
 
             Current research log tail:
             {research_excerpt}
@@ -2385,6 +2708,14 @@ def scientist_a_pick(
             - include physics-based rationale (mass balance, zone allocation effects, adsorption/desorption/selectivity), not rank-only claims
             - include explicit compute/budget impact and stopping/failure criteria
 
+            Acquisition strategy requirement (MANDATORY):
+            - classify this proposal as exactly one of: EXPLORE, EXPLOIT, or VERIFY
+            - state what this run will teach that we don't already know (information_target)
+            - list at least 2 alternative candidates considered and why they were rejected
+            - identify the coverage gap this fills (untested NC, unexplored flow region, untested hypothesis)
+            - reference at least one hypothesis from hypotheses.json that this run tests or one failure mode from failures.json that it risks
+            - assess convergence: are we improving? stagnating? should we shift strategy?
+
             Remaining candidate shortlist:
             {json.dumps(shortlist, indent=2)}
 
@@ -2392,6 +2723,12 @@ def scientist_a_pick(
             {{
               "candidate_index": <0-based index into shortlist>,
               "reason": "<brief reason>",
+              "acquisition_type": "EXPLORE | EXPLOIT | VERIFY",
+              "information_target": "<what will this run teach us that we don't already know?>",
+              "alternatives_considered": ["<candidate X rejected because...>", "<candidate Y rejected because...>"],
+              "coverage_gap": "<what untested NC / flow region / hypothesis does this fill?>",
+              "hypothesis_connection": "<which hypothesis ID from hypotheses.json does this test, or which failure mode ID does it risk?>",
+              "convergence_assessment": "<are we improving? stagnating? should we shift strategy?>",
               "evidence": ["<specific evidence item>", "..."],
               "comparison_to_previous": ["<explicit comparison to named prior run with metric/termination evidence>", "..."],
               "last_two_run_comparison": ["<R-1: run_name + metrics + what changed>", "<R-2: run_name + metrics + what changed>"],
@@ -2606,6 +2943,34 @@ def scientist_a_pick(
                         "Require quantitative competitor NC comparisons (productivity/purity/recovery/violation)."
                     ],
                 }
+            # --- Acquisition strategy validation ---
+            acquisition_type = str(data.get("acquisition_type", "")).strip().upper()
+            if acquisition_type not in {"EXPLORE", "EXPLOIT", "VERIFY"}:
+                return default_index, {
+                    "mode": "deterministic",
+                    "reason": "Rejected LLM proposal: missing or invalid acquisition_type (must be EXPLORE, EXPLOIT, or VERIFY).",
+                    "priority_updates": [
+                        "Every proposal must classify itself as EXPLORE, EXPLOIT, or VERIFY per the Acquisition Strategy Protocol."
+                    ],
+                }
+            information_target = str(data.get("information_target", "")).strip()
+            if len(information_target) < 10:
+                return default_index, {
+                    "mode": "deterministic",
+                    "reason": "Rejected LLM proposal: information_target is missing or too vague.",
+                    "priority_updates": [
+                        "State specifically what this run will teach us that we don't already know."
+                    ],
+                }
+            alternatives_considered = normalize_text_list(data.get("alternatives_considered"), max_items=6)
+            if len(alternatives_considered) < 2:
+                return default_index, {
+                    "mode": "deterministic",
+                    "reason": "Rejected LLM proposal: must consider at least 2 alternatives before choosing this candidate.",
+                    "priority_updates": [
+                        "List at least 2 alternative candidates considered and why they were rejected."
+                    ],
+                }
             data["evidence"] = evidence
             data["comparison_to_previous"] = comparisons
             data["last_two_run_comparison"] = last_two_comparisons
@@ -2616,6 +2981,12 @@ def scientist_a_pick(
             data["nc_competitor_comparison"] = nc_comparisons
             data["failure_criteria"] = normalize_text_list(data.get("failure_criteria"), max_items=8)
             data["diagnostic_hypothesis"] = str(data.get("diagnostic_hypothesis", "")).strip()
+            data["acquisition_type"] = acquisition_type
+            data["information_target"] = information_target
+            data["alternatives_considered"] = alternatives_considered
+            data["coverage_gap"] = str(data.get("coverage_gap", "")).strip()
+            data["hypothesis_connection"] = str(data.get("hypothesis_connection", "")).strip()
+            data["convergence_assessment"] = str(data.get("convergence_assessment", "")).strip()
             chosen = shortlist[idx]
             absolute_idx = candidate_tasks.index(chosen)
             return absolute_idx, {
@@ -3240,6 +3611,8 @@ def main() -> int:
     executive_log: List[Dict[str, object]] = []
     ledger: List[Dict[str, object]] = []
     tried: set[Tuple[Tuple[int, ...], str]] = set()
+    heuristics_excerpt = build_heuristics_context(max_chars=4000)
+    sim_counter = 0  # global simulation counter for convergence tracking
 
     try:
         initialize_conversation_stream(conversation_stream_artifact)
@@ -3288,6 +3661,7 @@ def main() -> int:
             sqlite_excerpt = sqlite_history_context(sqlite_conn)
             nc_strategy_excerpt = nc_strategy_board(sqlite_conn, nc_library_values)
             research_excerpt = read_research_tail(research_path, args.research_tail_chars)
+            convergence_excerpt = sqlite_convergence_context(sqlite_conn, args.run_name)
             try:
                 idx, a_note = scientist_a_pick(
                     client,
@@ -3306,6 +3680,8 @@ def main() -> int:
                     sqlite_excerpt,
                     search_hours_used,
                     search_iteration,
+                    heuristics_context=heuristics_excerpt,
+                    convergence_context=convergence_excerpt,
                 )
             except Exception as exc:
                 idx = deterministic_select(search_tasks, tried)
@@ -3473,6 +3849,12 @@ def main() -> int:
                 result["executive_forced_from_task"] = task
                 search_results.append(result)
                 persist_result_to_sqlite(sqlite_conn, args.run_name, "search", result)
+                sim_counter += 1
+                record_convergence_snapshot(
+                    sqlite_conn, args.run_name, "agent", sim_counter, result,
+                    search_hours_used * 3600.0, search_hours_used,
+                    acquisition_type="FORCE_DIAGNOSTIC",
+                )
                 append_result_research(research_path, result, "search")
                 append_research(
                     research_path,
@@ -3513,6 +3895,15 @@ def main() -> int:
             )
             search_results.append(result)
             persist_result_to_sqlite(sqlite_conn, args.run_name, "search", result)
+            sim_counter += 1
+            acq_type = str(a_note.get("acquisition_type", "")).strip().upper() if isinstance(a_note, dict) else ""
+            record_convergence_snapshot(
+                sqlite_conn, args.run_name, "agent", sim_counter, result,
+                search_hours_used * 3600.0, search_hours_used,
+                acquisition_type=acq_type,
+            )
+            # Refresh heuristics after each run so next proposal uses updated knowledge
+            heuristics_excerpt = build_heuristics_context(max_chars=4000)
             append_result_research(research_path, result, "search")
             append_research(
                 research_path,
@@ -3657,6 +4048,11 @@ def main() -> int:
             "sqlite": {
                 "db_path": str(Path(args.sqlite_db).resolve()),
                 "record_count": sqlite_record_count(sqlite_conn),
+            },
+            "convergence": {
+                "total_simulations": sim_counter,
+                "method": "agent",
+                "summary": sqlite_convergence_context(sqlite_conn, args.run_name),
             },
             "research": {
                 "path": str(research_path.resolve()),

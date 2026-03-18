@@ -14,3 +14,5 @@ _sembasmb_git_backup/
 
 .DS_Store
 Thumbs.db
+SMB_KratonFeed_LOCAL_TEST.ipynb
+slurm/local_command.md

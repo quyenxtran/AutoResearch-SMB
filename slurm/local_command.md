@@ -1,3 +1,31 @@
+## Ollama 27B model setup (one-time)
+
+```bash
+export OLLAMA_HOST=127.0.0.1:11555
+export OLLAMA_MODELS=/storage/scratch1/4/qtran47/.ollama/models
+
+cat > /storage/scratch1/4/qtran47/models/gguf/qwen35-27b/Modelfile.chat64k <<'EOF'
+FROM qwen35-27b-unsloth-q4-chat:latest
+PARAMETER num_ctx 64000
+PARAMETER temperature 0
+PARAMETER top_p 0.9
+PARAMETER repeat_penalty 1.1
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|endoftext|>"
+PARAMETER stop "</think>"
+SYSTEM "Return strict JSON only. No commentary."
+EOF
+
+~/.local/ollama/bin/ollama create qwen35-27b-unsloth-q4-chat64k \
+  -f /storage/scratch1/4/qtran47/models/gguf/qwen35-27b/Modelfile.chat64k
+
+# Verify model exists
+find "$OLLAMA_MODELS/manifests" -type f | grep -i qwen35-27b-unsloth || echo "MISSING"
+```
+
+---
+
 ## Quick 3-job comparative batch (from `~/AutoResearch-SMB`)
 
 ```bash
@@ -101,34 +129,7 @@ slurm/pace_smb_two_scientists_qwen.slurm
 
 ---
 
-## Ollama 27B model setup (one-time)
 
-```bash
-PORT=11555
-export OLLAMA_HOST=127.0.0.1:$PORT
-export OLLAMA_MODELS=/storage/scratch1/4/qtran47/.ollama/models
-
-cat > /storage/scratch1/4/qtran47/models/gguf/qwen35-27b/Modelfile.chat64k <<'EOF'
-FROM qwen35-27b-unsloth-q4-chat:latest
-PARAMETER num_ctx 64000
-PARAMETER temperature 0
-PARAMETER top_p 0.9
-PARAMETER repeat_penalty 1.1
-PARAMETER stop "<|im_end|>"
-PARAMETER stop "<|im_start|>"
-PARAMETER stop "<|endoftext|>"
-PARAMETER stop "</think>"
-SYSTEM "Return strict JSON only. No commentary."
-EOF
-
-~/.local/ollama/bin/ollama create qwen35-27b-unsloth-q4-chat64k \
-  -f /storage/scratch1/4/qtran47/models/gguf/qwen35-27b/Modelfile.chat64k
-
-# Verify model exists
-find "$OLLAMA_MODELS/manifests" -type f | grep -i qwen35-27b-unsloth || echo "MISSING"
-```
-
----
 
 ## Monitoring a running job
 

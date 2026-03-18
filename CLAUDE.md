@@ -81,11 +81,11 @@ F1 = Fdes + Fex        (desorbent zone balance)
 **`run_stage.py`** — Standalone CLI that runs a single optimization stage (`solver-check`, `reference-eval`, `nc-screen`, `flow-screen`, `optimize-layouts`). Contains `NOTEBOOK_SEEDS` — 8 reference operating points from the Kraton feed notebook that serve as warm-start initializations. `IpoptLiveMonitor` runs in a background thread, tailing the IPOPT log and killing the solver if it stalls (watchdog).
 
 **`agent_runner.py`** — The LLM orchestration layer. Implements the three-scientist loop:
-- **Scientist_A** (proposer): reads `agents/` knowledge files + SQLite history, proposes next candidate
+- **Scientist_A** (proposer): reads `agents/` knowledge files + SQLite history + heuristics (hypotheses.json/failures.json) + convergence tracker, proposes next candidate with acquisition reasoning (EXPLORE/EXPLOIT/VERIFY)
 - **Scientist_B** (reviewer): independently validates A's proposal against physics and prior data
-- **Scientist_Executive**: fires when A and B deadlock (repeated rejections), forces execution of a top diagnostic run
+- **Scientist_Executive** (moderator): rules on every A/B disagreement with 5-ruling taxonomy (IMPLEMENT_A, IMPLEMENT_B_COUNTER, IMPLEMENT_HYBRID, RETURN_FOR_REVISION, FORCE_DIAGNOSTIC)
 
-All experiment results are persisted to a SQLite DB (`smb_agent_context.sqlite`). The LLM context is built from: objectives file, LLM soul file, IPOPT resource file, tail of `research.md`, and the full SQLite history for the current run.
+All experiment results are persisted to a SQLite DB (`smb_agent_context.sqlite`). The `convergence_tracker` table records best-feasible-J after each simulation for sample efficiency comparison against the MINLP baseline. The LLM context is built from: objectives, soul, IPOPT resources, heuristics files, convergence tracker, `research.md` tail, and the full SQLite history.
 
 ### Knowledge files (`agents/`)
 

@@ -213,7 +213,7 @@
         "Repeated similar flow configurations evaluated without improvement"
       ],
       "recovery_steps": [
-        "Switch to single best-known layout (1,2,3,2) instead of all-layout search",
+        "Narrow layout search scope to layouts that showed lowest violation in prior runs",
         "Use low-fidelity pre-screening (nfex=5, nfet=2, ncp=1) to filter before high-fidelity",
         "Seed from reference notebook point rather than random initialization",
         "Extend wall-time if possible via: sbatch --time=10:00:00"
@@ -221,7 +221,7 @@
       "prevention": [
         "Always run low-fidelity probe (SMB_PROBE_LOW_FIDELITY_ENABLED=1) to pre-screen",
         "Set SMB_MIN_PROBE_REFERENCE_RUNS appropriately (3-5 for quick runs, 35+ for thorough)",
-        "Use SMB_NC_LIBRARY to limit layout search scope when budget is tight"
+        "Use SMB_NC_LIBRARY to limit layout search scope when budget is tight, based on feasibility evidence from prior runs"
       ],
       "evidence_summary": "Adaptive budget allocation (low-fi screening first) improved solution quality by 15% in budget-constrained scenarios",
       "confidence": "medium",
@@ -318,7 +318,7 @@
       ],
       "prevention": [
         "Always run nc-screen stage first when exploring new operating conditions",
-        "Set SMB_NC_LIBRARY to include at least (1,2,3,2), (2,2,2,2), (1,3,2,2) in every comparative run",
+        "Use SMB_NC_LIBRARY=all or a sufficiently diverse layout set in every comparative run",
         "Do not deep-optimize a single layout until all layouts have at least one feasible eval"
       ],
       "evidence_summary": "Systematic layout exploration (all layouts first) found optimal layout in 100% of test cases vs 65% for random sampling",
