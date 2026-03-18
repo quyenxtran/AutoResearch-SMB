@@ -569,7 +569,7 @@ def build_flow(args: argparse.Namespace) -> FlowRates:
 
 
 def resolve_solver_name(requested: str) -> str:
-    from src.smb_solver import check_solver_available  # type: ignore
+    from sembasmb import check_solver_available
 
     if requested != "auto":
         return requested
@@ -1388,7 +1388,7 @@ def evaluate_optimized_layout(
 
 
 def run_solver_check(args: argparse.Namespace) -> Dict[str, object]:
-    from src.smb_solver import check_solver_available  # type: ignore
+    from sembasmb import check_solver_available
 
     candidates = parse_solver_candidates(args.solver_candidates)
     solver_reports = {}
