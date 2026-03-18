@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--conversation-stream-log", default=os.environ.get("SMB_CONVERSATION_STREAM_LOG", ""))
     parser.add_argument("--sqlite-db", default=os.environ.get("SMB_SQLITE_DB", str(REPO_ROOT / "artifacts" / "agent_runs" / "smb_agent_context.sqlite")))
     parser.add_argument("--research-md", default=os.environ.get("SMB_RESEARCH_MD", str(REPO_ROOT / "research.md")))
-    parser.add_argument("--research-tail-chars", type=int, default=int(os.environ.get("SMB_RESEARCH_TAIL_CHARS", "6000")))
+    parser.add_argument("--research-tail-chars", type=int, default=int(os.environ.get("SMB_RESEARCH_TAIL_CHARS", "2500")))
     parser.add_argument("--reset-research-section", action="store_true", default=os.environ.get("SMB_RESEARCH_RESET_SECTION", "0") == "1")
     parser.add_argument("--nc-library", default=os.environ.get("SMB_NC_LIBRARY", "1,2,3,2;2,2,2,2;1,3,2,2"))
     parser.add_argument("--seed-library", default=os.environ.get("SMB_SEED_LIBRARY", "notebook"))
@@ -2737,13 +2737,29 @@ def scientist_a_pick(
     convergence_context: str = "",
 ) -> Tuple[int, Dict[str, object]]:
     remaining = [task for task in candidate_tasks if (tuple(task["nc"]), str(task["seed_name"])) not in tried]
-    shortlist = remaining[: min(len(remaining), 8)]
+    shortlist = remaining[: min(len(remaining), 5)]
     default_index = deterministic_select(candidate_tasks, tried)
     if not shortlist:
         return default_index, {"mode": "deterministic", "reason": "No remaining tasks."}
 
     best = rank_any_results(results)[0] if results else None
     recent_two_block, recent_two_labels = recent_two_run_review_context(results)
+    objectives_compact = compact_prompt_block(objectives_excerpt, max_chars=1500, max_lines=40)
+    soul_compact = compact_prompt_block(soul_excerpt, max_chars=1200, max_lines=35)
+    codebase_compact = compact_prompt_block(codebase_context_excerpt, max_chars=900, max_lines=28)
+    compute_compact = compact_prompt_block(compute_context_excerpt, max_chars=600, max_lines=22)
+    constraint_compact = compact_prompt_block(constraint_context_excerpt, max_chars=800, max_lines=28)
+    heuristics_compact = compact_prompt_block(heuristics_context, max_chars=900, max_lines=30)
+    convergence_compact = compact_prompt_block(convergence_context, max_chars=800, max_lines=28)
+    research_compact = compact_prompt_block(research_excerpt, max_chars=700, max_lines=22)
+    nc_strategy_compact = compact_prompt_block(nc_strategy_excerpt, max_chars=900, max_lines=30)
+    sqlite_compact = compact_prompt_block(sqlite_context_excerpt, max_chars=1100, max_lines=35)
+    recent_two_compact = compact_prompt_block(recent_two_block, max_chars=800, max_lines=28)
+    priorities_compact = "\n".join(f"- {p}" for p in current_priorities[:8]) or "- none"
+    shortlist_brief = [
+        {"index": i, "nc": list(item["nc"]), "seed_name": str(item["seed_name"])}
+        for i, item in enumerate(shortlist)
+    ]
     prompt_warning = ""
     try:
         prompt = textwrap.dedent(
@@ -2756,37 +2772,37 @@ def scientist_a_pick(
             Each simulation is expensive. Your competitive advantage over brute-force MINLP is choosing the HIGHEST-VALUE next experiment. Justify why this candidate is the most informative use of the next solver call.
 
             Objective summary:
-            {objectives_excerpt}
+            {objectives_compact}
 
             Scientist rules summary:
-            {soul_excerpt}
+            {soul_compact}
 
             Codebase context summary:
-            {codebase_context_excerpt}
+            {codebase_compact}
 
             Runtime compute context:
-            {compute_context_excerpt}
+            {compute_compact}
 
             Simulation objective/constraint context:
-            {constraint_context_excerpt}
+            {constraint_compact}
 
             Accumulated heuristics (hypotheses and known failure modes):
-            {heuristics_context}
+            {heuristics_compact}
 
             Convergence progress:
-            {convergence_context}
+            {convergence_compact}
 
             Current research log tail:
-            {research_excerpt}
+            {research_compact}
 
             NC strategy board (all layouts in current library):
-            {nc_strategy_excerpt}
+            {nc_strategy_compact}
 
             Current priority board:
-            {json.dumps(current_priorities, indent=2)}
+            {priorities_compact}
 
             Historical simulation context (queried from SQLite):
-            {sqlite_context_excerpt}
+            {sqlite_compact}
 
             Counted benchmark budget is {args.benchmark_hours:.1f} SMB hours with {args.search_hours:.1f} search hours and {args.validation_hours:.1f} validation hours.
             Search wall-hours used so far: {budget_used:.4f}
@@ -2797,7 +2813,7 @@ def scientist_a_pick(
             {summarize_result(best) if best else "None yet."}
 
             Recent two completed runs (must be reviewed deeply when available):
-            {recent_two_block}
+            {recent_two_compact}
 
             Required rigor:
             - compare candidate NC against at least two alternative NC layouts from the strategy board
@@ -2819,7 +2835,7 @@ def scientist_a_pick(
             - assess convergence: are we improving? stagnating? should we shift strategy?
 
             Remaining candidate shortlist:
-            {json.dumps(shortlist, indent=2)}
+            {json.dumps(shortlist_brief, separators=(",", ":"))}
 
             Respond with JSON only:
             {{
@@ -2852,8 +2868,8 @@ def scientist_a_pick(
         prompt = (
             "You are Scientist_A for SMB optimization. Return JSON only.\n\n"
             f"Current best result: {summarize_result(best) if best else 'None yet.'}\n"
-            f"Recent two completed runs:\n{recent_two_block}\n\n"
-            f"Remaining candidate shortlist:\n{json.dumps(shortlist, indent=2)}\n\n"
+            f"Recent two completed runs:\n{recent_two_compact}\n\n"
+            f"Remaining candidate shortlist:\n{json.dumps(shortlist_brief, separators=(',', ':'))}\n\n"
             "Respond with keys: candidate_index, reason, evidence, comparison_to_previous, "
             "last_two_run_comparison, flowrate_comparison, delta_summary, column_topology_comparison, physics_rationale, nc_competitor_comparison, diagnostic_hypothesis, failure_criteria, fidelity, priority_updates, proposed_followups."
         )
@@ -3154,6 +3170,20 @@ def scientist_b_review(
     default = deterministic_review(task, best_result)
     prompt_warning = ""
     recent_two_block, recent_two_labels = recent_two_run_review_context(results)
+    codebase_compact = compact_prompt_block(codebase_context_excerpt, max_chars=900, max_lines=28)
+    compute_compact = compact_prompt_block(compute_context_excerpt, max_chars=600, max_lines=22)
+    constraint_compact = compact_prompt_block(constraint_context_excerpt, max_chars=800, max_lines=28)
+    nc_strategy_compact = compact_prompt_block(nc_strategy_excerpt, max_chars=900, max_lines=30)
+    research_compact = compact_prompt_block(research_excerpt, max_chars=700, max_lines=22)
+    sqlite_compact = compact_prompt_block(sqlite_context_excerpt, max_chars=1100, max_lines=35)
+    recent_two_compact = compact_prompt_block(recent_two_block, max_chars=800, max_lines=28)
+    priorities_compact = "\n".join(f"- {p}" for p in current_priorities[:8]) or "- none"
+    proposed_task_brief = {"nc": list(task.get("nc", [])), "seed_name": str(task.get("seed_name", ""))}
+    effective_task_brief = {
+        "nc": list(effective_task.get("nc", [])) if isinstance(effective_task.get("nc"), list) else list(task.get("nc", [])),
+        "seed_name": str(effective_task.get("seed_name", task.get("seed_name", ""))),
+        "flow": effective_task.get("flow", {}),
+    }
     try:
         prompt = textwrap.dedent(
             f"""
@@ -3164,37 +3194,37 @@ def scientist_b_review(
             If you approve, still provide the strongest counterarguments and explicit risk checks.
 
             Proposed task:
-            {json.dumps(task, indent=2)}
+            {json.dumps(proposed_task_brief, separators=(",", ":"))}
 
             Effective bounded candidate that will actually be executed:
-            {json.dumps(effective_task, indent=2)}
+            {json.dumps(effective_task_brief, separators=(",", ":"))}
 
             Current best result:
             {summarize_result(best_result) if best_result else "None yet."}
 
             Recent two completed runs (must be reviewed deeply when available):
-            {recent_two_block}
+            {recent_two_compact}
 
             Codebase context summary:
-            {codebase_context_excerpt}
+            {codebase_compact}
 
             Runtime compute context:
-            {compute_context_excerpt}
+            {compute_compact}
 
             Simulation objective/constraint context:
-            {constraint_context_excerpt}
+            {constraint_compact}
 
             NC strategy board (all layouts in current library):
-            {nc_strategy_excerpt}
+            {nc_strategy_compact}
 
             Current research log tail:
-            {research_excerpt}
+            {research_compact}
 
             Current priority board:
-            {json.dumps(current_priorities, indent=2)}
+            {priorities_compact}
 
             Historical simulation context (queried from SQLite):
-            {sqlite_context_excerpt}
+            {sqlite_compact}
 
             Respond with JSON only:
             {{
@@ -3226,10 +3256,10 @@ def scientist_b_review(
         prompt = (
             "You are Scientist_B reviewer. Return JSON only with keys decision, reason, comparison_assessment, "
             "last_two_run_audit, flowrate_audit, delta_audit, column_topology_audit, physics_audit, counterproposal_run, nc_strategy_assessment, compute_assessment, counterarguments, required_checks, priority_updates, risk_flags.\n\n"
-            f"Proposed task:\n{json.dumps(task, indent=2)}\n\n"
-            f"Effective candidate:\n{json.dumps(effective_task, indent=2)}\n\n"
+            f"Proposed task:\n{json.dumps(proposed_task_brief, separators=(',', ':'))}\n\n"
+            f"Effective candidate:\n{json.dumps(effective_task_brief, separators=(',', ':'))}\n\n"
             f"Current best result: {summarize_result(best_result) if best_result else 'None yet.'}\n\n"
-            f"Recent two completed runs:\n{recent_two_block}"
+            f"Recent two completed runs:\n{recent_two_compact}"
         )
     raw = client.chat(
         "You are a hard-nosed numerical reviewer. Return JSON only and challenge weak proposals.",
@@ -3767,7 +3797,7 @@ def main() -> int:
     executive_log: List[Dict[str, object]] = []
     ledger: List[Dict[str, object]] = []
     tried: set[Tuple[Tuple[int, ...], str]] = set()
-    heuristics_excerpt = build_heuristics_context(max_chars=4000)
+    heuristics_excerpt = build_heuristics_context(max_chars=1800)
     sim_counter = 0  # global simulation counter for convergence tracking
 
     try:
