@@ -138,7 +138,14 @@ def add_optimization(
     return m
 
 
-def add_feasibility_objective(m, inputs: SMBInputs):
+def add_feasibility_objective(
+    m,
+    inputs: SMBInputs,
+    *,
+    purity_min: float = 0.60,
+    recovery_min_ga: float = 0.75,
+    recovery_min_ma: float = 0.75,
+):
     """Replace the productivity objective with a feasibility objective.
 
     Adds slack variables to the hard constraints (recovery, purity) and
@@ -171,16 +178,16 @@ def add_feasibility_objective(m, inputs: SMBInputs):
 
     # Add relaxed versions
     m.RecoveryExGA_relaxed = Constraint(
-        expr=(m.CE[ga_idx] * m.UE) / (cf_ga * m.UF) + m.slack_recovery_ga >= 0.75
+        expr=(m.CE[ga_idx] * m.UE) / (cf_ga * m.UF) + m.slack_recovery_ga >= recovery_min_ga
     )
     m.RecoveryExMA_relaxed = Constraint(
-        expr=(m.CE[ma_idx] * m.UE) / (cf_ma * m.UF) + m.slack_recovery_ma >= 0.75
+        expr=(m.CE[ma_idx] * m.UE) / (cf_ma * m.UF) + m.slack_recovery_ma >= recovery_min_ma
     )
 
     meoh_idx = inputs.comps.index('MeOH') + 1
     ce_acid = sum(m.CE[i] for i in m.acid)
     m.PurityExMeohFree_relaxed = Constraint(
-        expr=ce_acid + m.slack_purity >= 0.60 * (sum(m.CE[i] for i in m.comp) - m.CE[meoh_idx])
+        expr=ce_acid + m.slack_purity >= purity_min * (sum(m.CE[i] for i in m.comp) - m.CE[meoh_idx])
     )
 
     # Deactivate productivity objective

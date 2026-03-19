@@ -34,13 +34,13 @@ REFERENCE_RHO = (1.5, 1.6, 1.0, 0.79)
 REFERENCE_KAPP = (0.8, 1.22, 1.0, 0.69)
 NOTEBOOK_SEEDS = [
     {"name": "reference", "F1": 2.2, "Fdes": 1.2, "Fex": 0.9, "Ffeed": 1.3, "Fraf": 1.6, "tstep": 9.4},
-    {"name": "optimized_a", "F1": 3.6, "Fdes": 2.0, "Fex": 1.9, "Ffeed": 2.4, "Fraf": 2.5, "tstep": 8.0},
-    {"name": "optimized_a_minus", "F1": 3.6, "Fdes": 2.0, "Fex": 1.9, "Ffeed": 2.35, "Fraf": 2.45, "tstep": 8.0},
-    {"name": "optimized_a_plus", "F1": 3.6, "Fdes": 2.0, "Fex": 1.9, "Ffeed": 2.45, "Fraf": 2.55, "tstep": 8.0},
-    {"name": "optimized_b", "F1": 3.7, "Fdes": 2.0, "Fex": 1.9, "Ffeed": 2.4, "Fraf": 2.5, "tstep": 8.0},
-    {"name": "optimized_c", "F1": 3.5, "Fdes": 2.0, "Fex": 1.9, "Ffeed": 2.4, "Fraf": 2.5, "tstep": 8.0},
-    {"name": "optimized_2f1", "F1": 3.4, "Fdes": 1.9, "Fex": 1.7, "Ffeed": 2.5, "Fraf": 2.7, "tstep": 8.0},
-    {"name": "optimized_2f2", "F1": 3.5, "Fdes": 1.9, "Fex": 1.7, "Ffeed": 2.5, "Fraf": 2.7, "tstep": 8.0},
+    {"name": "optimized_a", "F1": 2.6, "Fdes": 1.4, "Fex": 1.0, "Ffeed": 1.2, "Fraf": 1.6, "tstep": 8.8},
+    {"name": "optimized_a_minus", "F1": 2.4, "Fdes": 1.3, "Fex": 1.0, "Ffeed": 1.1, "Fraf": 1.4, "tstep": 9.2},
+    {"name": "optimized_a_plus", "F1": 2.8, "Fdes": 1.5, "Fex": 1.1, "Ffeed": 1.3, "Fraf": 1.7, "tstep": 8.6},
+    {"name": "optimized_b", "F1": 2.5, "Fdes": 1.4, "Fex": 1.0, "Ffeed": 1.4, "Fraf": 1.8, "tstep": 9.0},
+    {"name": "optimized_c", "F1": 2.3, "Fdes": 1.3, "Fex": 0.9, "Ffeed": 1.2, "Fraf": 1.6, "tstep": 9.4},
+    {"name": "optimized_2f1", "F1": 2.7, "Fdes": 1.5, "Fex": 1.1, "Ffeed": 1.5, "Fraf": 1.9, "tstep": 8.7},
+    {"name": "optimized_2f2", "F1": 2.9, "Fdes": 1.6, "Fex": 1.2, "Ffeed": 1.6, "Fraf": 2.0, "tstep": 8.5},
 ]
 
 
@@ -522,7 +522,8 @@ def apply_seed_to_args(
     candidate_args.fdes = clip_to_bounds(float(seed["Fdes"]), fdes_bounds)
     candidate_args.fex = clip_to_bounds(float(seed["Fex"]), fex_bounds)
     candidate_args.ffeed = clip_to_bounds(float(seed["Ffeed"]), ffeed_bounds)
-    candidate_args.fraf = clip_to_bounds(float(seed["Fraf"]), fraf_bounds)
+    # Enforce flow consistency for seeded candidates.
+    candidate_args.fraf = derive_fraf(candidate_args.ffeed, candidate_args.fdes, candidate_args.fex)
     candidate_args.tstep = clip_to_bounds(float(seed["tstep"]), tstep_bounds)
     return candidate_args
 
@@ -568,6 +569,46 @@ def build_flow(args: argparse.Namespace) -> FlowRates:
         tstep=args.tstep,
         run_name=args.run_name,
     )
+
+
+def evaluate_flow_guard(args: argparse.Namespace, flow: FlowRates) -> Dict[str, object]:
+    fraf_bounds = parse_bounds(getattr(args, "fraf_bounds", None))
+    if fraf_bounds is None:
+        return {"ok": True, "reason": "No raffinate bounds provided; guard skipped."}
+    lb, ub = fraf_bounds
+    implied_fraf = derive_fraf(flow.Ffeed, flow.Fdes, flow.Fex)
+    guard_margin = float(getattr(args, "fraf_guard_margin", 0.05) or 0.0)
+    edge_distance = min(implied_fraf - lb, ub - implied_fraf)
+    if implied_fraf < lb or implied_fraf > ub:
+        return {
+            "ok": False,
+            "reason": (
+                f"Flow precheck failed: implied Fraf={implied_fraf:.4f} from "
+                f"Ffeed+Fdes-Fex is outside bounds [{lb:.4f}, {ub:.4f}]."
+            ),
+            "implied_fraf": implied_fraf,
+            "fraf_bounds": [lb, ub],
+            "guard_margin": guard_margin,
+        }
+    if edge_distance < guard_margin:
+        return {
+            "ok": False,
+            "reason": (
+                f"Flow precheck failed: implied Fraf={implied_fraf:.4f} is too close "
+                f"to bound edge (distance={edge_distance:.4f} < margin={guard_margin:.4f})."
+            ),
+            "implied_fraf": implied_fraf,
+            "fraf_bounds": [lb, ub],
+            "guard_margin": guard_margin,
+        }
+    return {
+        "ok": True,
+        "reason": "Flow precheck passed.",
+        "implied_fraf": implied_fraf,
+        "fraf_bounds": [lb, ub],
+        "guard_margin": guard_margin,
+        "edge_distance": edge_distance,
+    }
 
 
 def resolve_solver_name(requested: str) -> str:
@@ -693,15 +734,17 @@ def solver_result_usable(summary: Dict[str, str]) -> bool:
 
 
 def normalized_constraint_violation(metrics: Dict[str, float], flow: FlowRates, nc: Sequence[int], args: argparse.Namespace) -> Dict[str, float]:
+    max_pump_flow = float(getattr(args, "max_pump_flow", 2.5))
+    max_pump_flow_raf = float(getattr(args, "max_pump_flow_raf", max_pump_flow))
     slacks = {
         "purity_ex_meoh_free": metrics["purity_ex_meoh_free"] - args.purity_min,
         "recovery_ex_GA": metrics["recovery_ex_GA"] - args.recovery_ga_min,
         "recovery_ex_MA": metrics["recovery_ex_MA"] - args.recovery_ma_min,
         "F1_max": args.f1_max_flow - flow.F1,
-        "Fdes_max": args.max_pump_flow - flow.Fdes,
-        "Fex_max": args.max_pump_flow - flow.Fex,
-        "Ffeed_max": args.max_pump_flow - flow.Ffeed,
-        "Fraf_max": args.max_pump_flow - flow.Fraf,
+        "Fdes_max": max_pump_flow - flow.Fdes,
+        "Fex_max": max_pump_flow - flow.Fex,
+        "Ffeed_max": max_pump_flow - flow.Ffeed,
+        "Fraf_max": max_pump_flow_raf - flow.Fraf,
         "F2_positive": flow.F1 - flow.Fex,
         "F4_positive": flow.F1 - flow.Fdes,
         "nc_sum": 0.0 if sum(nc) == 8 else -abs(sum(nc) - 8),
@@ -711,12 +754,12 @@ def normalized_constraint_violation(metrics: Dict[str, float], flow: FlowRates, 
         + max(0.0, -slacks["recovery_ex_GA"]) / max(args.recovery_ga_min, 1e-12)
         + max(0.0, -slacks["recovery_ex_MA"]) / max(args.recovery_ma_min, 1e-12)
         + max(0.0, -slacks["F1_max"]) / max(args.f1_max_flow, 1e-12)
-        + max(0.0, -slacks["Fdes_max"]) / max(args.max_pump_flow, 1e-12)
-        + max(0.0, -slacks["Fex_max"]) / max(args.max_pump_flow, 1e-12)
-        + max(0.0, -slacks["Ffeed_max"]) / max(args.max_pump_flow, 1e-12)
-        + max(0.0, -slacks["Fraf_max"]) / max(args.max_pump_flow, 1e-12)
-        + max(0.0, -slacks["F2_positive"]) / max(args.max_pump_flow, 1e-12)
-        + max(0.0, -slacks["F4_positive"]) / max(args.max_pump_flow, 1e-12)
+        + max(0.0, -slacks["Fdes_max"]) / max(max_pump_flow, 1e-12)
+        + max(0.0, -slacks["Fex_max"]) / max(max_pump_flow, 1e-12)
+        + max(0.0, -slacks["Ffeed_max"]) / max(max_pump_flow, 1e-12)
+        + max(0.0, -slacks["Fraf_max"]) / max(max_pump_flow_raf, 1e-12)
+        + max(0.0, -slacks["F2_positive"]) / max(max_pump_flow, 1e-12)
+        + max(0.0, -slacks["F4_positive"]) / max(max_pump_flow, 1e-12)
         + max(0.0, -slacks["nc_sum"])
     )
     slacks["normalized_total_violation"] = normalized
@@ -991,6 +1034,31 @@ def evaluate_candidate(args: argparse.Namespace, nc: Sequence[int], *, return_mo
     solver_options = dict(build_solver_options(args))
     config = load_config(args, nc)
     flow = build_flow(args)
+    flow_guard = evaluate_flow_guard(args, flow)
+    if not bool(flow_guard.get("ok", False)):
+        return {
+            "status": "solver_error",
+            "stage": args.stage,
+            "run_name": args.run_name,
+            "nc": list(nc),
+            "flow": {
+                "Ffeed": flow.Ffeed,
+                "F1": flow.F1,
+                "Fdes": flow.Fdes,
+                "Fex": flow.Fex,
+                "Fraf": flow.Fraf,
+                "tstep": flow.tstep,
+            },
+            "fidelity": {"nfex": config.nfex, "nfet": config.nfet, "ncp": config.ncp, "xscheme": config.xscheme},
+            "error": str(flow_guard.get("reason", "Flow precheck failed.")),
+            "flow_guard": flow_guard,
+            "timing": {
+                "wall_seconds": 0.0,
+                "cpu_seconds_python": 0.0,
+                "cpus_used_for_accounting": 0,
+                "cpu_hours_accounted": 0.0,
+            },
+        }
     monitor, monitor_log_path = maybe_start_ipopt_monitor(args, watchdog_kill_callback=terminate_ipopt_descendants)
     if monitor_log_path is not None:
         solver_options["output_file"] = str(monitor_log_path)
@@ -1193,6 +1261,33 @@ def evaluate_optimized_layout(
     solver_options = dict(build_solver_options(args))
     config = load_config(args, nc)
     flow = build_flow(args)
+    flow_guard = evaluate_flow_guard(args, flow)
+    if not bool(flow_guard.get("ok", False)):
+        return {
+            "status": "solver_error",
+            "stage": args.stage,
+            "run_name": args.run_name,
+            "nc": list(nc),
+            "seed_name": getattr(args, "seed_name", None),
+            "seed_flow_original": getattr(args, "seed_flow_original", None),
+            "initial_flow": {
+                "Ffeed": flow.Ffeed,
+                "F1": flow.F1,
+                "Fdes": flow.Fdes,
+                "Fex": flow.Fex,
+                "Fraf": flow.Fraf,
+                "tstep": flow.tstep,
+            },
+            "fidelity": {"nfex": config.nfex, "nfet": config.nfet, "ncp": config.ncp, "xscheme": config.xscheme},
+            "error": str(flow_guard.get("reason", "Flow precheck failed.")),
+            "flow_guard": flow_guard,
+            "timing": {
+                "wall_seconds": 0.0,
+                "cpu_seconds_python": 0.0,
+                "cpus_used_for_accounting": 0,
+                "cpu_hours_accounted": 0.0,
+            },
+        }
     monitor, monitor_log_path = maybe_start_ipopt_monitor(args, watchdog_kill_callback=terminate_ipopt_descendants)
     if monitor_log_path is not None:
         solver_options["output_file"] = str(monitor_log_path)
@@ -1252,7 +1347,13 @@ def evaluate_optimized_layout(
             from sembasmb import feasibility_restoration_options, warm_start_options  # type: ignore
 
             # Phase 1: minimize constraint violation
-            add_feasibility_objective(m, inputs)
+            add_feasibility_objective(
+                m,
+                inputs,
+                purity_min=float(args.purity_min),
+                recovery_min_ga=float(args.recovery_ga_min),
+                recovery_min_ma=float(args.recovery_ma_min),
+            )
             phase1_options = dict(solver_options)
             phase1_options.update(feasibility_restoration_options())
             if monitor_log_path is not None:
@@ -1972,11 +2073,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recovery-ga-min", type=float, default=0.90)
     parser.add_argument("--recovery-ma-min", type=float, default=0.90)
     parser.add_argument("--max-pump-flow", type=float, default=2.5)
+    parser.add_argument("--max-pump-flow-raf", type=float, default=float(os.environ.get("SMB_MAX_PUMP_FLOW_RAF_ML_MIN", "5.0")))
     parser.add_argument("--tstep-bounds", default="8.0,12.0")
     parser.add_argument("--ffeed-bounds", default="0.5,2.5")
     parser.add_argument("--fdes-bounds", default="0.5,2.5")
     parser.add_argument("--fex-bounds", default="0.5,2.5")
-    parser.add_argument("--fraf-bounds", default="0.5,2.5")
+    parser.add_argument("--fraf-bounds", default="0.5,5.0")
+    parser.add_argument("--fraf-guard-margin", type=float, default=float(os.environ.get("SMB_FRAF_GUARD_MARGIN", "0.05")))
     parser.add_argument("--f1-bounds", default="0.5,5.0")
     parser.add_argument("--f1-min", type=float, default=0.5)
     parser.add_argument("--f1-max", type=float)

@@ -1374,8 +1374,14 @@ def configure_stage_args(base: argparse.Namespace, args: argparse.Namespace) -> 
     stage_args.fraf_bounds = env_or_default("SMB_FRAF_BOUNDS", stage_args.fraf_bounds)
     stage_args.tstep_bounds = env_or_default("SMB_TSTEP_BOUNDS", stage_args.tstep_bounds)
     stage_args.max_pump_flow = float(env_or_default("SMB_MAX_PUMP_FLOW_ML_MIN", str(stage_args.max_pump_flow)))
+    stage_args.max_pump_flow_raf = float(
+        env_or_default("SMB_MAX_PUMP_FLOW_RAF_ML_MIN", str(getattr(stage_args, "max_pump_flow_raf", 5.0)))
+    )
     stage_args.f1_max_flow = float(env_or_default("SMB_F1_MAX_FLOW", str(stage_args.f1_max_flow)))
     stage_args.f1_max = float(env_or_default("SMB_F1_MAX_FLOW", str(stage_args.f1_max_flow)))
+    stage_args.fraf_guard_margin = float(
+        env_or_default("SMB_FRAF_GUARD_MARGIN", str(getattr(stage_args, "fraf_guard_margin", 0.05)))
+    )
     stage_args.purity_min = float(env_or_default("SMB_TARGET_PURITY_EX_MEOH_FREE", str(stage_args.purity_min)))
     stage_args.recovery_ga_min = float(env_or_default("SMB_TARGET_RECOVERY_GA", str(stage_args.recovery_ga_min)))
     stage_args.recovery_ma_min = float(env_or_default("SMB_TARGET_RECOVERY_MA", str(stage_args.recovery_ma_min)))
