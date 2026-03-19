@@ -3,7 +3,7 @@
 ```bash
 # Local: commit and push
 git add .
-git commit -m "resolve_ipopt_parallel_profile / ipopt_accounting_cpus"
+git commit -m "Raw JSON mode in request payload + Evidence coercion + minimum fallback + Deterministic bootstrap (first 1–2 runs)"
 git push origin main
 
 # On PACE
@@ -46,6 +46,9 @@ SMB_LIVE_RESULTS_LOG=${LIVE},\
 AGENT_ENTRYPOINT="${ROOT}/.venv/bin/python -m benchmarks.agent_runner --method agent_v2 --run-name agent_v2_${JOBTAG} --tee --research-md ${ROOT}/artifacts/agent_runs/research_agent_v2_${JOBTAG}.md --sqlite-db ${DB} --reset-research-section" \
 slurm/pace_smb_two_scientists_qwen.slurm -->
 
+OLLAMA_GPU_ID=0,\
+CUDA_VISIBLE_DEVICES=0,\
+
 ROOT=/storage/home/hcoda1/4/qtran47/Agent-Driven-NLP-Optimizer
 JOBTAG=v2_$(date +%Y%m%d_%H%M%S)
 DB=$ROOT/artifacts/agent_runs/smb_agent_context_${JOBTAG}.sqlite
@@ -55,37 +58,39 @@ export SMB_TSTEP_BOUNDS="8.0,12.0"
 sbatch --export=ALL,\
 START_LOCAL_LLM=1,\
 LOCAL_LLM_USE_GPU=1,\
-OLLAMA_GPU_ID=0,\
-CUDA_VISIBLE_DEVICES=0,\
-OLLAMA_LLM_LIBRARY=cuda_v12,\
+OLLAMA_DEBUG=INFO,\
 SMB_FALLBACK_LLM_ENABLED=0,\
 SMB_LOCAL_LLM_MODEL=qwen35-9b-q4-32k:latest,\
 SMB_EXECUTIVE_LLM_MODEL=deepseek-r1:7b,\
+OLLAMA_HOST=127.0.0.1:11555,\
+OLLAMA_MODELS=/storage/scratch1/4/qtran47/.ollama/models,\
+OLLAMA_NUM_PARALLEL=1,\
+OLLAMA_MAX_LOADED_MODELS=2,\
+SMB_LLM_TIMEOUT_SECONDS=1200,\
+SMB_LLM_MAX_RETRIES=2,\
+SMB_OLLAMA_PREWARM_ENABLED=1,\
+SMB_OLLAMA_PREWARM_MAX_SECONDS=180,\
+SMB_OLLAMA_PULL_IF_MISSING=0,\
+SMB_LLM_MAX_TOKENS=800,\
 SMB_METHOD=agent_v2,\
 SMB_EXECUTIVE_ARBITRATION_ENABLED=1,\
 SMB_EXECUTIVE_MAX_REVISIONS=1,\
 SMB_SYSTEMATIC_INFEASIBILITY_K=5,\
 SMB_RANDOM_SEARCH_MODE=0,\
-SMB_IPOPT_WORKERS=2,\
-SMB_IPOPT_THREADS_PER_WORKER=2,\
-OLLAMA_MODELS=/storage/scratch1/4/qtran47/.ollama/models,\
-OLLAMA_HOST=127.0.0.1:11555,\
-OLLAMA_NUM_PARALLEL=1,\
-OLLAMA_MAX_LOADED_MODELS=1,\
-SMB_LLM_TIMEOUT_SECONDS=1200,\
-SMB_LLM_MAX_RETRIES=1,\
-SMB_LLM_MAX_TOKENS=800,\
-SMB_OLLAMA_PREWARM_ENABLED=1,\
-SMB_OLLAMA_PREWARM_MAX_SECONDS=180,\
-SMB_SKIP_INITIAL_PLAN_LLM=1,\
 SMB_CONVERSATION_LOG_MODE=full,\
 SMB_CONVERSATION_RESPONSE_MAX_CHARS=10000,\
 SMB_LIVE_RESULTS_LOG=${LIVE},\
-SMB_OBJECTIVES_MAX_CHARS=1200,\
-SMB_LLM_SOUL_MAX_CHARS=900,\
-SMB_RESEARCH_TAIL_CHARS=600,\
+SMB_BOOTSTRAP_REFERENCE_RUNS=2,\
+SMB_IPOPT_WORKERS=2,\
+SMB_IPOPT_THREADS_PER_WORKER=2,\
+OMP_NUM_THREADS=2,\
+MKL_NUM_THREADS=2,\
+OPENBLAS_NUM_THREADS=2,\
+NUMEXPR_NUM_THREADS=2,\
 AGENT_ENTRYPOINT="${ROOT}/.venv/bin/python -m benchmarks.agent_runner --method agent_v2 --run-name agent_v2_${JOBTAG} --tee --research-md ${ROOT}/artifacts/agent_runs/research_agent_v2_${JOBTAG}.md --sqlite-db ${DB} --reset-research-section" \
 slurm/pace_smb_two_scientists_qwen.slurm
+
+
 
 
 
@@ -127,36 +132,48 @@ grep -Ei "GPULayers|loaded CUDA backend|offloaded .* layers to GPU" logs/ollama-
 
 ```bash
 # Live output/error
-tail -n 30 -f logs/smb-two-scientists-5078856.out 
-tail -n 30 -f logs/smb-two-scientists-5078856.err
-tail -n 30 -f logs/ollama-smb-5078856.log 
+tail -n 30 -f logs/smb-two-scientists-5083700.out 
+tail -n 30 -f logs/smb-two-scientists-5079126.err
+tail -n 30 -f logs/ollama-smb-5083700.log 
 
 # CPU/GPU monitor
-srun --jobid=5078856 --overlap bash -lc '
+srun --jobid=5083700 --overlap bash -lc '
 while true; do
   clear
   echo "=== $(date) ==="
   top -b -n 1 | head -n 20
   echo
   nvidia-smi --query-gpu=index,name,utilization.gpu,utilization.memory,memory.used,memory.total --format=csv,noheader
-  sleep 2
+
+  echo "workers=$SMB_IPOPT_WORKERS threads=$SMB_IPOPT_THREADS_PER_WORKER cpus=$SLURM_CPUS_PER_TASK"
+  ps -u "$USER" -o pid,pcpu,comm,args | grep -E "ipopt|run_stage" | grep -v grep
+  sleep 4
 done'
 
 ```
+JOB=5080350
+srun --jobid=$JOB --overlap bash -lc 'echo workers=$SMB_IPOPT_WORKERS threads=$SMB_IPOPT_THREADS_PER_WORKER cpus=$SLURM_CPUS_PER_TASK; pgrep -af ipopt'
 
 
 
 ## Live conversation stream (while job is running)
 Live compact stream (scientist A/B/C only):
-JOB=5077708
+JOB=5080350
 
 tail -F "$FILE" | jq -r '[.call_id,.role,(.metadata.iteration//""),(.assistant_response//.assistant_response_preview//"")] | @tsv'
 
 ## Use this for live A + B + C full text:
 
-JOB=5078856
-FILE=$(ls -t artifacts/agent_runs/*.conversations.jsonl 2>/dev/null | head -1); echo "$FILE"
-tail -F "$FILE" | jq -r 'select(.role|test("^scientist_(a_pick|b_review|c_arbitrate)$")) | "\n--- call=\(.call_id) role=\(.role) iter=\(.metadata.iteration // "") backend=\(.final_backend) ---\n\(.assistant_response // .assistant_response_preview // "")\n"'
+
+
+JOB=5083700
+FILE=$(ls -t artifacts/agent_runs/agent-runner.${JOB}.*.conversations.jsonl 2>/dev/null | head -1)
+LIVE=$(ls -t artifacts/agent_runs/live_results_*.jsonl 2>/dev/null | head -1)
+
+tail -F "$FILE" | jq -r '
+  select(.role|test("^scientist_(a_pick|b_review|c_arbitrate)(?:_repair)?$")) |
+  "\n--- call=\(.call_id) role=\(.role) iter=\(.metadata.iteration // "") backend=\(.final_backend // "") ---\n\(.assistant_response // .assistant_response_preview // "<empty>")\n"
+'
 
 
 ## Use this for a live structured quality view (decision/reason/comparison counts/physics field):

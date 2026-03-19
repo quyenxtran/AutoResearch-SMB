@@ -269,7 +269,7 @@ OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
 OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}"
 OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-1}"
 OLLAMA_LOAD_TIMEOUT="${OLLAMA_LOAD_TIMEOUT:-5m}"
-OLLAMA_GPU_ID="${OLLAMA_GPU_ID:-0}"
+OLLAMA_GPU_ID="${OLLAMA_GPU_ID:-}"
 SMB_OLLAMA_PULL_IF_MISSING="${SMB_OLLAMA_PULL_IF_MISSING:-0}"
 SMB_OLLAMA_PREWARM_ENABLED="${SMB_OLLAMA_PREWARM_ENABLED:-1}"
 SMB_OLLAMA_PREWARM_MAX_SECONDS="${SMB_OLLAMA_PREWARM_MAX_SECONDS:-45}"
@@ -450,8 +450,13 @@ start_local_qwen() {
 
   local visible_devices
   if [[ "${LOCAL_LLM_USE_GPU}" == "1" ]]; then
-    visible_devices="${OLLAMA_GPU_ID}"
-    echo "[$(date '+%F %T')] START: local Ollama server for Qwen on GPU ${OLLAMA_GPU_ID}"
+    # Preserve Slurm-assigned CUDA_VISIBLE_DEVICES by default; only fall back to OLLAMA_GPU_ID when needed.
+    if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+      visible_devices="${CUDA_VISIBLE_DEVICES}"
+    else
+      visible_devices="${OLLAMA_GPU_ID}"
+    fi
+    echo "[$(date '+%F %T')] START: local Ollama server for Qwen on GPU map '${visible_devices:-<auto>}'"
   else
     visible_devices=""
     echo "[$(date '+%F %T')] START: local Ollama server for Qwen on CPU"
