@@ -2,8 +2,8 @@
 
 ```bash
 # Local: commit and push
-git add .
-git commit -m "reduce silence time out"
+git add benchmarks/agent_runner.py agents/LLM_SOUL.md tests/test_agent_logic.py
+git commit -m "Add executive arbitration, random mode, infeasibility guard, and agent logic tests"
 git push origin main
 
 # On PACE
@@ -67,6 +67,47 @@ slurm/pace_smb_two_scientists_qwen.slurm
 ## Two-scientists mode (Qwen 9B)
 
 ```bash
+#9B Base
+JOBTAG=two_$(date +%Y%m%d_%H%M%S)
+DB=/storage/home/hcoda1/4/qtran47/AutoResearch-SMB/artifacts/agent_runs/smb_agent_context_${JOBTAG}.sqlite
+export SMB_TSTEP_BOUNDS="8.0,12.0"
+
+sbatch --export=ALL,\
+START_LOCAL_LLM=1,\
+SMB_FALLBACK_LLM_ENABLED=0,\
+SMB_LOCAL_LLM_MODEL=qwen3.5:9b,\
+OLLAMA_MODELS=/storage/scratch1/4/qtran47/.ollama/models,\
+OLLAMA_HOST=127.0.0.1:11555,\
+OLLAMA_LOAD_TIMEOUT=5m,\
+OLLAMA_NUM_PARALLEL=1,\
+OLLAMA_MAX_LOADED_MODELS=1,\
+SMB_LLM_TIMEOUT_SECONDS=600,\
+SMB_LLM_MAX_RETRIES=1,\
+SMB_SKIP_INITIAL_PLAN_LLM=1,\
+SMB_OLLAMA_PULL_IF_MISSING=0,\
+SMB_OLLAMA_PREWARM_ENABLED=1,\
+SMB_OLLAMA_PREWARM_MAX_SECONDS=60,\
+SMB_RESEARCH_TAIL_CHARS=1200,\
+SMB_OBJECTIVES_MAX_CHARS=3000,\
+SMB_LLM_SOUL_MAX_CHARS=1800,\
+SMB_PROBLEM_DEFINITION_MAX_CHARS=1200,\
+SMB_SKILLS_MAX_CHARS=1200,\
+SMB_IPOPT_PRECHECK_TIMEOUT_SECONDS=10,\
+SMB_IPOPT_RESOURCE_MAX_CHARS=900,\
+SMB_NC_LIBRARY=all,\
+SMB_AGENT_MAX_SEARCH_EVALS=120,\
+SMB_MIN_PROBE_REFERENCE_RUNS=35,\
+SMB_SINGLE_SCIENTIST_MODE=0,\
+SMB_PROBE_LOW_FIDELITY_ENABLED=1,\
+SMB_PROBE_NFEX=5,\
+SMB_PROBE_NFET=2,\
+SMB_PROBE_NCP=1,\
+SMB_AGENT_TEE=1,\
+AGENT_ENTRYPOINT="/storage/scratch1/4/qtran47/AutoResearch-SMB/.venv/bin/python -m benchmarks.agent_runner --single-scientist-mode 0 --tee --run-name two_scientists_all35_${JOBTAG} --research-md /storage/home/hcoda1/4/qtran47/AutoResearch-SMB/artifacts/agent_runs/research_two_${JOBTAG}.md --sqlite-db ${DB} --reset-research-section" \
+slurm/pace_smb_two_scientists_qwen.slurm
+
+
+
 #9B with 32k context
 JOBTAG=two_$(date +%Y%m%d_%H%M%S)
 DB=/storage/home/hcoda1/4/qtran47/AutoResearch-SMB/artifacts/agent_runs/smb_agent_context_${JOBTAG}.sqlite
