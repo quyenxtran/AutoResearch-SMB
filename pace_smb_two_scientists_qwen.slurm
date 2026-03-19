@@ -258,6 +258,7 @@ OLLAMA_KEEP_ALIVE="${OLLAMA_KEEP_ALIVE:-30m}"
 OLLAMA_MAX_LOADED_MODELS="${OLLAMA_MAX_LOADED_MODELS:-1}"
 OLLAMA_NUM_PARALLEL="${OLLAMA_NUM_PARALLEL:-2}"
 OLLAMA_LOAD_TIMEOUT="${OLLAMA_LOAD_TIMEOUT:-10m}"
+OLLAMA_PREWARM_MAX_TIME="${OLLAMA_PREWARM_MAX_TIME:-${SMB_LLM_TIMEOUT_SECONDS:-90}}"
 OLLAMA_GPU_ID="${OLLAMA_GPU_ID:-0}"
 export SMB_FALLBACK_LLM_ENABLED="${SMB_FALLBACK_LLM_ENABLED:-1}"
 export SMB_FALLBACK_LLM_BASE_URL="${SMB_FALLBACK_LLM_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}"
@@ -470,7 +471,7 @@ start_local_qwen() {
   prompt_payload=$(printf '{"model":"%s","messages":[{"role":"user","content":"ping"}],"stream":false}' "${OLLAMA_MODEL}")
   response_file="$(mktemp)"
   http_code="$(curl -sS \
-    --max-time 600 \
+    --max-time "${OLLAMA_PREWARM_MAX_TIME}" \
     -o "${response_file}" \
     -w '%{http_code}' \
     -H "Content-Type: application/json" \

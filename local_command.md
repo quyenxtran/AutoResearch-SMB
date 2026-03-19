@@ -24,3 +24,37 @@ sbatch --export=ALL,SMB_SUITE_TAG=$TAG pace_smb_single_scientist_24h.slurm
 sbatch --export=ALL,SMB_SUITE_TAG=$TAG pace_smb_two_scientists_24h.slurm
 
 
+
+
+
+
+JOBTAG=two_$(date +%Y%m%d_%H%M%S)
+DB=/storage/home/hcoda1/4/qtran47/AutoResearch-SMB/artifacts/agent_runs/smb_agent_context_${JOBTAG}.sqlite
+
+sbatch --export=ALL,\
+START_LOCAL_LLM=1,\
+SMB_SINGLE_SCIENTIST_MODE=0,\
+SMB_FALLBACK_LLM_ENABLED=0,\
+SMB_LOCAL_LLM_MODEL=qwen35-9b-q4-32k:latest,\
+OLLAMA_MODELS=/storage/scratch1/4/qtran47/.ollama/models,\
+OLLAMA_HOST=127.0.0.1:11555,\
+SMB_LLM_TIMEOUT_SECONDS=90,\
+SMB_LLM_MAX_RETRIES=1,\
+SMB_LLM_RETRY_BACKOFF_SECONDS=0,\
+SMB_AGENT_TEE=1,\
+AGENT_ENTRYPOINT="/storage/scratch1/4/qtran47/AutoResearch-SMB/.venv/bin/python -m benchmarks.agent_runner --single-scientist-mode 0 --tee --run-name two_scientists_${JOBTAG} --research-md /storage/home/hcoda1/4/qtran47/AutoResearch-SMB/artifacts/agent_runs/research_two_${JOBTAG}.md --sqlite-db ${DB} --reset-research-section" \
+pace_smb_two_scientists_qwen.slurm
+
+
+
+tail -f logs/smb-two-scientists-5056263.out 
+tail -f logs/smb-two-scientists-5055879.err
+
+JOB=5056263
+srun --jobid=$JOB --pty bash -lc 'while true; do clear; echo "=== GPU ==="; nvidia-smi --query-gpu=index,utilization.gpu,utilization.memory,memory.used,memory.total,power.draw --format=csv,noheader; echo; echo "=== CPU ==="; top -b -n 1 | head -20; sleep 1; done'
+
+
+JOB=5056263
+srun --jobid=$JOB --pty bash -lc 
+FILE=$(ls -t artifacts/agent_runs/agent-runner.'"$JOB"'.*.conversations.jsonl 2>/dev/null | head -1)
+echo "FILE=$FILE"
