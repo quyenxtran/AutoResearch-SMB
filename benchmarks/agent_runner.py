@@ -280,367 +280,48 @@ def env_or_default(name: str, default: str) -> str:
     return value if value not in {None, ""} else default
 
 
-def sqlite_convergence_context(conn: sqlite3.Connection, agent_run_name: str) -> str:
-    """Build a convergence summary for the agent to assess its own progress."""
-    rows = conn.execute(
-        """
-        SELECT sim_number, best_feasible_j, best_feasible_productivity,
-               best_feasible_run_name, total_feasible, total_runs,
-               nc_layouts_tested, acquisition_type, cumulative_wall_seconds
-        FROM convergence_tracker
-        WHERE agent_run_name = ?
-        ORDER BY sim_number ASC
-        """,
-        (agent_run_name,),
-    ).fetchall()
-    if not rows:
-        return "Convergence tracker: no data yet."
-
-    lines = ["Convergence tracker (best feasible J after each simulation):"]
-    last_j = None
-    stagnation_count = 0
-    for row in rows:
-        sim_num, best_j, best_prod, best_run, n_feasible, n_total, n_nc, acq_type, cum_wall = row
-        improved = ""
-        if best_j is not None:
-            if last_j is None or best_j > last_j:
-                improved = " [NEW BEST]"
-                stagnation_count = 0
-                last_j = best_j
-            else:
-                stagnation_count += 1
-        lines.append(
-            f"- sim={sim_num} best_J={best_j} best_prod={best_prod} best_run={best_run} "
-            f"feasible={n_feasible}/{n_total} nc_tested={n_nc} type={acq_type} "
-            f"wall_s={cum_wall:.1f}{improved}"
-        )
-
-    # Summary statistics
-    total_explore = sum(1 for r in rows if r[7] == "EXPLORE")
-    total_exploit = sum(1 for r in rows if r[7] == "EXPLOIT")
-    total_verify = sum(1 for r in rows if r[7] == "VERIFY")
-    total_other = len(rows) - total_explore - total_exploit - total_verify
-    lines.append(
-        f"Acquisition balance: EXPLORE={total_explore} EXPLOIT={total_exploit} "
-        f"VERIFY={total_verify} other={total_other}"
-    )
-    lines.append(f"Simulations since last improvement: {stagnation_count}")
-    return "\n".join(lines)
 
 
-def sqlite_targeted_query(conn: sqlite3.Connection, query_type: str, **kwargs: object) -> str:
-    """Run targeted queries against the simulation history for deeper analysis."""
-    lines: List[str] = []
-
-    if query_type == "nc_detail":
-        nc_val = str(kwargs.get("nc", ""))
-        rows = conn.execute(
-            """
-            SELECT candidate_run_name, seed_name, status, feasible, j_validated, productivity,
-                   purity, recovery_ga, recovery_ma, normalized_total_violation,
-                   ffeed, f1, fdes, fex, fraf, tstep, termination_condition
-            FROM simulation_results WHERE nc = ?
-            ORDER BY j_validated DESC, productivity DESC, id DESC
-            """,
-            (nc_val,),
-        ).fetchall()
-        lines.append(f"All runs for nc={nc_val} ({len(rows)} total):")
-        for row in rows:
-            lines.append(
-                f"  {row[0]} seed={row[1]} status={row[2]} feasible={bool(row[3])} J={row[4]} prod={row[5]} "
-                f"purity={row[6]} rGA={row[7]} rMA={row[8]} viol={row[9]} "
-                f"flow(Ffeed={row[10]},F1={row[11]},Fdes={row[12]},Fex={row[13]},Fraf={row[14]},tstep={row[15]}) "
-                f"term={row[16]}"
-            )
-
-    elif query_type == "flow_region":
-        min_ffeed = float(kwargs.get("min_ffeed", 0.0))
-        max_ffeed = float(kwargs.get("max_ffeed", 99.0))
-        rows = conn.execute(
-            """
-            SELECT candidate_run_name, nc, feasible, j_validated, productivity, purity,
-                   recovery_ga, recovery_ma, ffeed, f1, fdes, fex, tstep
-            FROM simulation_results
-            WHERE ffeed >= ? AND ffeed <= ?
-            ORDER BY j_validated DESC, productivity DESC
-            LIMIT 20
-            """,
-            (min_ffeed, max_ffeed),
-        ).fetchall()
-        lines.append(f"Runs with Ffeed in [{min_ffeed}, {max_ffeed}] ({len(rows)} shown):")
-        for row in rows:
-            lines.append(
-                f"  {row[0]} nc={row[1]} feasible={bool(row[2])} J={row[3]} prod={row[4]} "
-                f"purity={row[5]} rGA={row[6]} rMA={row[7]} "
-                f"Ffeed={row[8]} F1={row[9]} Fdes={row[10]} Fex={row[11]} tstep={row[12]}"
-            )
-
-    elif query_type == "binding_constraint":
-        rows = conn.execute(
-            """
-            SELECT candidate_run_name, nc, purity, recovery_ga, recovery_ma,
-                   normalized_total_violation, productivity, feasible
-            FROM simulation_results
-            WHERE feasible = 0 AND normalized_total_violation IS NOT NULL
-            ORDER BY normalized_total_violation ASC
-            LIMIT 20
-            """,
-        ).fetchall()
-        lines.append(f"Near-feasible runs sorted by violation ({len(rows)} shown):")
-        for row in rows:
-            purity = row[2] or 0.0
-            rga = row[3] or 0.0
-            rma = row[4] or 0.0
-            # Identify which constraint is most binding
-            bottleneck = []
-            if purity < 0.60:
-                bottleneck.append(f"purity({purity:.4f}<0.60)")
-            if rga < 0.75:
-                bottleneck.append(f"rGA({rga:.4f}<0.75)")
-            if rma < 0.75:
-                bottleneck.append(f"rMA({rma:.4f}<0.75)")
-            lines.append(
-                f"  {row[0]} nc={row[1]} viol={row[5]} prod={row[6]} "
-                f"binding=[{', '.join(bottleneck) if bottleneck else 'unknown'}]"
-            )
-
-    elif query_type == "improvement_history":
-        rows = conn.execute(
-            """
-            SELECT id, candidate_run_name, nc, feasible, j_validated, productivity,
-                   purity, wall_seconds
-            FROM simulation_results
-            ORDER BY id ASC
-            """,
-        ).fetchall()
-        lines.append("Improvement history (cumulative best J over time):")
-        best_j: Optional[float] = None
-        for row in rows:
-            j = row[4]
-            if row[3] and j is not None:
-                if best_j is None or j > best_j:
-                    best_j = j
-                    lines.append(
-                        f"  sim={row[0]} {row[1]} nc={row[2]} J={j} prod={row[5]} purity={row[6]} [IMPROVED]"
-                    )
-
-    else:
-        lines.append(f"Unknown query type: {query_type}")
-
-    return "\n".join(lines) if lines else "No results."
 
 
-def bottleneck_label(result: Dict[str, object]) -> str:
-    metrics, _ = extract_metrics_with_validity(result)
-    purity = as_float(metrics.get("purity_ex_meoh_free")) or 0.0
-    rga = as_float(metrics.get("recovery_ex_GA")) or 0.0
-    rma = as_float(metrics.get("recovery_ex_MA")) or 0.0
-    status = str(result.get("status", "")).strip().lower()
-    if status in {"solver_error", "error", "other"}:
-        return "solver_error"
-    gaps: List[str] = []
-    if purity < 0.60:
-        gaps.append("purity")
-    if rga < 0.75:
-        gaps.append("recovery_ga")
-    if rma < 0.75:
-        gaps.append("recovery_ma")
-    if gaps:
-        return ",".join(gaps)
-    return "unknown"
 
 
-def compact_result_record(result: Dict[str, object]) -> Dict[str, object]:
-    flow = effective_flow(result) or {}
-    metrics, metrics_validated = extract_metrics_with_validity(result)
-    return {
-        "run_name": str(result.get("run_name", "")),
-        "nc": list(result.get("nc", [])),
-        "seed_name": str(result.get("seed_name", "")),
-        "status": str(result.get("status", "")),
-        "feasible": bool(result.get("feasible", False)),
-        "j_validated": as_float(result.get("J_validated")),
-        "productivity": as_float(metrics.get("productivity_ex_ga_ma")),
-        "purity": as_float(metrics.get("purity_ex_meoh_free")),
-        "recovery_ga": as_float(metrics.get("recovery_ex_GA")),
-        "recovery_ma": as_float(metrics.get("recovery_ex_MA")),
-        "normalized_total_violation": effective_violation(result),
-        "metrics_validated": metrics_validated,
-        "flow": {
-            "Ffeed": as_float(flow.get("Ffeed")),
-            "F1": as_float(flow.get("F1")),
-            "Fdes": as_float(flow.get("Fdes")),
-            "Fex": as_float(flow.get("Fex")),
-            "Fraf": as_float(flow.get("Fraf")),
-            "tstep": as_float(flow.get("tstep")),
-        },
-    }
 
 
-def normalize_evidence_refs(value: object, max_items: int = 8) -> List[str]:
-    refs = normalize_text_list(value, max_items=max_items)
-    return [item.strip() for item in refs if str(item).strip()]
 
 
-def build_evidence_fallback_items(evidence_pack: Dict[str, object], max_items: int = 8) -> List[str]:
-    rows: List[Dict[str, object]] = []
-    for key in ("recent_runs", "top_feasible", "top_infeasible"):
-        value = evidence_pack.get(key)
-        if isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    rows.append(item)
-    items: List[str] = []
-    seen_run_names: set[str] = set()
-    for row in rows:
-        run_name = str(row.get("run_name", "")).strip()
-        if not run_name or run_name in seen_run_names:
-            continue
-        seen_run_names.add(run_name)
-        items.append(
-            "run_name="
-            + run_name
-            + f" status={row.get('status')} feasible={row.get('feasible')} "
-            + f"prod={row.get('productivity')} purity={row.get('purity')} "
-            + f"rGA={row.get('recovery_ga')} rMA={row.get('recovery_ma')} "
-            + f"viol={row.get('normalized_total_violation')}"
-        )
-        if len(items) >= max_items:
-            break
-    if not items:
-        catalog = normalize_text_list(evidence_pack.get("run_name_catalog"), max_items=max_items)
-        for run_name in catalog:
-            items.append(f"run_name={run_name} catalog_reference")
-            if len(items) >= max_items:
-                break
-    return items
 
 
-def nc_key(nc: Sequence[int]) -> str:
-    return ",".join(str(int(v)) for v in nc)
 
 
-def nc_prior_score(nc: Sequence[int]) -> float:
-    # Neutral structural prior: mild penalty for extreme column count asymmetry only.
-    # Does NOT bias toward any specific layout (e.g., reference (1,2,3,2)).
-    # The only structural preference is against layouts where one zone has all 8 columns
-    # (physically degenerate) or where asymmetry is so extreme the zone functions break down.
-    vals = [int(v) for v in nc]
-    asymmetry = max(vals) - min(vals)
-    return 100.0 - 1.5 * asymmetry
 
 
-def sqlite_total_records_from_excerpt(text: str) -> int:
-    match = re.search(r"total_records=(\d+)", text or "")
-    return int(match.group(1)) if match else 0
 
 
-def text_mentions_prior_runs(items: Sequence[str]) -> bool:
-    pattern = re.compile(r"(run_name|run=|search_|validate_|reference-eval|optimize-layouts|status=|viol=|J=)")
-    return any(pattern.search(str(item)) for item in items)
 
 
-def text_mentions_metric_signals(items: Sequence[str]) -> bool:
-    pattern = re.compile(
-        r"(prod(?:uctivity)?=|productivity|purity|recovery|rga=|rma=|viol(?:ation)?=|normalized_total_violation|J=|feasible=)",
-        flags=re.IGNORECASE,
-    )
-    return any(pattern.search(str(item)) for item in items)
 
 
-def text_mentions_numeric_values(items: Sequence[str]) -> bool:
-    pattern = re.compile(r"[-+]?\d*\.?\d+(?:e[-+]?\d+)?", flags=re.IGNORECASE)
-    return any(pattern.search(str(item)) for item in items)
 
 
-def text_mentions_delta_metric_signals(items: Sequence[str]) -> bool:
-    blob = " ".join(str(item) for item in items)
-    required = [
-        r"(?:Δ|delta|d)[_\-\s]?(?:prod|productivity)",
-        r"(?:Δ|delta|d)[_\-\s]?purity",
-        r"(?:Δ|delta|d)[_\-\s]?rga",
-        r"(?:Δ|delta|d)[_\-\s]?rma",
-        r"(?:Δ|delta|d)[_\-\s]?(?:viol|violation)",
-    ]
-    return all(re.search(pattern, blob, flags=re.IGNORECASE) for pattern in required)
 
 
-def count_flow_signal_mentions(items: Sequence[str]) -> int:
-    flow_tokens = ("ffeed", "f1", "fdes", "fex", "fraf", "tstep")
-    blob = " ".join(str(item).lower() for item in items)
-    return sum(1 for token in flow_tokens if token in blob)
 
 
-def text_mentions_delta_flow_signals(items: Sequence[str], min_count: int = 3) -> bool:
-    if count_flow_signal_mentions(items) < min_count:
-        return False
-    blob = " ".join(str(item) for item in items)
-    pattern = re.compile(
-        r"(?:Δ|delta|d)[_\-\s]?(?:ffeed|f1|fdes|fex|fraf|tstep)",
-        flags=re.IGNORECASE,
-    )
-    return bool(pattern.search(blob))
 
 
-def text_mentions_run_name_signals(items: Sequence[str]) -> bool:
-    pattern = re.compile(r"(run_name=|run=|search_nc_|validate_|reference)", flags=re.IGNORECASE)
-    return any(pattern.search(str(item)) for item in items)
 
 
-def text_mentions_required_labels(items: Sequence[str], labels: Sequence[str]) -> bool:
-    if not labels:
-        return True
-    blob = " ".join(str(item) for item in items)
-    return all(str(label) in blob for label in labels)
 
 
-def text_mentions_flow_signals(items: Sequence[str]) -> bool:
-    pattern = re.compile(r"(Ffeed|F1|Fdes|Fex|Fraf|tstep|flow|F2|F4)", flags=re.IGNORECASE)
-    return any(pattern.search(str(item)) for item in items)
 
 
-def text_mentions_topology_signals(items: Sequence[str]) -> bool:
-    pattern = re.compile(
-        r"(nc=|nc\[|nc\s*\[|topology|zone|z1|z2|z3|z4|column|columns|fragmentation|symmetry|Δz1|Δz2|Δz3|Δz4)",
-        flags=re.IGNORECASE,
-    )
-    return any(pattern.search(str(item)) for item in items)
 
 
-def text_mentions_physics_signals(items: Sequence[str]) -> bool:
-    pattern = re.compile(
-        r"(mass\s*balance|mass\s*transfer|adsorption|desorption|zone|selectivity|isotherm|equilibrium|transport|hydrodynamic|flow\s*split|residence)",
-        flags=re.IGNORECASE,
-    )
-    return any(pattern.search(str(item)) for item in items)
 
 
-def extract_nc_mentions(text: str) -> set[Tuple[int, int, int, int]]:
-    mentions: set[Tuple[int, int, int, int]] = set()
-    if not text:
-        return mentions
-    pattern = re.compile(
-        r"(?:nc\s*[:=]\s*)?[\[\(]\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*[\]\)]",
-        flags=re.IGNORECASE,
-    )
-    for m in pattern.finditer(text):
-        mentions.add((int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))))
-    return mentions
 
 
-def review_references_candidate_nc(
-    reason: str,
-    comparisons: Sequence[str],
-    nc_assessment: Sequence[str],
-    candidate_nc: Sequence[int],
-) -> bool:
-    candidate = tuple(int(v) for v in candidate_nc)
-    blob = " ".join([str(reason)] + [str(x) for x in comparisons] + [str(x) for x in nc_assessment])
-    mentioned = extract_nc_mentions(blob)
-    # If no explicit NC text is present, we do not fail this check.
-    if not mentioned:
-        return True
-    return candidate in mentioned
 
 
 def nc_strategy_board(conn: sqlite3.Connection, nc_library: Sequence[Sequence[int]]) -> str:
@@ -731,163 +412,14 @@ def nc_strategy_board(conn: sqlite3.Connection, nc_library: Sequence[Sequence[in
     return "\n".join(lines)
 
 
-def read_doc_excerpt(path: str, max_chars: int = 4000) -> str:
-    p = Path(path)
-    if not p.exists():
-        return f"Missing file: {path}"
-    text = p.read_text(encoding="utf-8")
-    return compact_prompt_block(text, max_chars=max_chars, max_lines=200)
 
 
-def markdown_focused_excerpt(
-    path: str,
-    heading_keywords: Sequence[str],
-    max_chars: int,
-    max_lines: int = 120,
-) -> str:
-    p = Path(path)
-    if not p.exists():
-        return f"Missing file: {path}"
-    text = p.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
-    matches = list(re.finditer(r"^##\s+(.+)$", text, flags=re.MULTILINE))
-    if not matches:
-        return compact_prompt_block(text, max_chars=max_chars, max_lines=max_lines)
-    keywords = [k.lower() for k in heading_keywords]
-    selected_chunks: List[str] = []
-    for idx, match in enumerate(matches):
-        heading = match.group(1).strip().lower()
-        if not any(key in heading for key in keywords):
-            continue
-        start = match.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        selected_chunks.append(text[start:end].strip())
-    if not selected_chunks:
-        return compact_prompt_block(text, max_chars=max_chars, max_lines=max_lines)
-    merged = "\n\n".join(selected_chunks)
-    return compact_prompt_block(merged, max_chars=max_chars, max_lines=max_lines)
 
 
-def build_heuristics_context(max_chars: int = 4000) -> str:
-    """Build a compact summary of hypotheses.json and failures.json for agent context.
-
-    This gives the agent access to accumulated heuristics so it can make
-    informed decisions grounded in prior knowledge, not just raw data.
-    """
-    lines: List[str] = []
-
-    # --- Hypotheses summary ---
-    hyp_path = REPO_ROOT / "agents" / "hypotheses.json"
-    if hyp_path.exists():
-        try:
-            hyp_data = json.loads(hyp_path.read_text(encoding="utf-8"))
-            hypotheses = hyp_data.get("hypotheses", [])
-            lines.append(f"HYPOTHESES ({len(hypotheses)} total):")
-            for h in hypotheses:
-                hid = h.get("id", "?")
-                title = h.get("title", "")
-                status = h.get("status", "unknown")
-                confidence = h.get("confidence", "unknown")
-                n_results = len(h.get("simulation_results", []))
-                statement = h.get("statement", "")[:120]
-                lines.append(
-                    f"- {hid}: [{status}/{confidence}] {title} ({n_results} results)"
-                )
-                lines.append(f"  claim: {statement}")
-                # Show latest result verdict if any
-                results = h.get("simulation_results", [])
-                for r in results[-2:]:
-                    if r.get("run_name"):
-                        lines.append(
-                            f"  last_evidence: run={r.get('run_name')} verdict={r.get('verdict')} "
-                            f"notes={str(r.get('notes', ''))[:80]}"
-                        )
-        except (json.JSONDecodeError, KeyError):
-            lines.append("HYPOTHESES: failed to parse hypotheses.json")
-    else:
-        lines.append("HYPOTHESES: hypotheses.json not found")
-
-    lines.append("")
-
-    # --- Failures summary ---
-    fail_path = REPO_ROOT / "agents" / "failures.json"
-    if fail_path.exists():
-        try:
-            fail_data = json.loads(fail_path.read_text(encoding="utf-8"))
-            failures = fail_data.get("failures", [])
-            lines.append(f"FAILURE MODES ({len(failures)} known):")
-            for f_item in failures:
-                fid = f_item.get("id", "?")
-                title = f_item.get("title", "")
-                severity = f_item.get("severity", "unknown")
-                n_occurrences = len(f_item.get("occurrences", []))
-                symptoms = f_item.get("symptoms", [])
-                symptom_text = symptoms[0][:80] if symptoms else ""
-                lines.append(
-                    f"- {fid}: [{severity}] {title} ({n_occurrences} occurrences)"
-                )
-                if symptom_text:
-                    lines.append(f"  symptom: {symptom_text}")
-                # Show prevention hint
-                prevention = f_item.get("prevention", [])
-                if prevention:
-                    lines.append(f"  prevent: {prevention[0][:80]}")
-        except (json.JSONDecodeError, KeyError):
-            lines.append("FAILURE MODES: failed to parse failures.json")
-    else:
-        lines.append("FAILURE MODES: failures.json not found")
-
-    result = "\n".join(lines)
-    return result[:max_chars]
 
 
-def apply_flow_adjustments(base_flow: Dict[str, float], flow_adjustments: Optional[Dict[str, float]]) -> Dict[str, float]:
-    keys = ("Ffeed", "F1", "Fdes", "Fex", "Fraf", "tstep")
-    adjusted = {key: float(base_flow.get(key, 0.0)) for key in keys}
-    if not isinstance(flow_adjustments, dict):
-        return adjusted
-    for key in keys:
-        delta = as_float(flow_adjustments.get(key))
-        if delta is None:
-            continue
-        value = adjusted[key] + float(delta)
-        if key == "tstep":
-            adjusted[key] = max(1e-6, value)
-        else:
-            adjusted[key] = max(0.0, value)
-    return adjusted
 
 
-def build_task_from_counterproposal(
-    base_task: Dict[str, object],
-    counterproposal: Dict[str, object],
-    *,
-    effective_task: Optional[Dict[str, object]] = None,
-    mode: str = "counterproposal",
-) -> Dict[str, object]:
-    task_mode = str(mode or "counterproposal").strip().lower()
-    base_nc = list(base_task.get("nc", [])) if isinstance(base_task.get("nc"), list) else []
-    counter_nc = counterproposal.get("nc")
-    if isinstance(counter_nc, list) and len(counter_nc) == 4 and all(isinstance(v, (int, float)) for v in counter_nc):
-        selected_nc = [int(v) for v in counter_nc] if task_mode != "hybrid" else base_nc
-    else:
-        selected_nc = base_nc
-    base_seed = base_task.get("seed")
-    seed_name = str(base_task.get("seed_name", counterproposal.get("seed_name", "")))
-    if effective_task and isinstance(effective_task.get("flow"), dict):
-        base_flow = {k: float(v) for k, v in effective_task.get("flow", {}).items() if isinstance(v, (int, float))}
-    else:
-        base_flow = {}
-    flow_adjustments = counterproposal.get("flow_adjustments")
-    flow_override = apply_flow_adjustments(base_flow, flow_adjustments if isinstance(flow_adjustments, dict) else None)
-    return {
-        "nc": selected_nc,
-        "seed_name": seed_name,
-        "seed": base_seed,
-        "flow_override": flow_override,
-        "counterproposal_run": counterproposal,
-        "task_mode": task_mode,
-        "source_task": dict(base_task),
-    }
 
 
 def parse_constraint_names(source: str) -> List[str]:
@@ -1019,15 +551,6 @@ def optimization_constraint_context_text(args: argparse.Namespace) -> str:
     )
 
 
-def reset_research_run_section(path: Path, run_name: str) -> None:
-    if not path.exists():
-        return
-    marker = f"\n## Run: {run_name}\n"
-    text = path.read_text(encoding="utf-8")
-    idx = text.find(marker)
-    if idx == -1:
-        return
-    path.write_text(text[:idx].rstrip() + "\n", encoding="utf-8")
 
 
 def start_research_log(
@@ -1117,111 +640,16 @@ def start_research_log(
     append_research(path, "\n".join(section) + "\n")
 
 
-def append_final_research(
-    path: Path,
-    best_result: Optional[Dict[str, object]],
-    ranked_search: List[Dict[str, object]],
-    ranked_validation: List[Dict[str, object]],
-) -> None:
-    lines = [
-        "\n### Run Closing Summary",
-        f"- finished_utc: {utc_now_text()}",
-        f"- best_result: {best_result.get('run_name') if isinstance(best_result, dict) else 'none'}",
-        f"- best_status: {best_result.get('status') if isinstance(best_result, dict) else 'n/a'}",
-        f"- search_results_count: {len(ranked_search)}",
-        f"- validation_results_count: {len(ranked_validation)}",
-        "",
-        "### Proposed Next Simulations",
-    ]
-    if ranked_search:
-        top = ranked_search[:3]
-        for item in top:
-            flow = effective_flow(item) or {}
-            lines.append(
-                f"- Probe around run={item.get('run_name')} nc={item.get('nc')} "
-                f"with +/- small perturbations on Ffeed/Fdes/Fex while preserving flow consistency. Base flow={flow}"
-            )
-    else:
-        lines.append("- Re-run layout/seed screening with broader nc and notebook seeds; no valid search record yet.")
-    append_research(path, "\n".join(lines) + "\n")
 
 
-def safe_result_metric(result: Dict[str, object], key: str) -> Optional[float]:
-    if result.get("status") == "ok":
-        metrics = result.get("metrics") or {}
-        if key in metrics:
-            return float(metrics[key])  # type: ignore[arg-type]
-    provisional = result.get("provisional") or {}
-    metrics = provisional.get("metrics") or {}
-    if key in metrics:
-        return float(metrics[key])  # type: ignore[arg-type]
-    return None
 
 
-def stream_components_from_outlets(outlets: Dict[str, object], stream_key: str) -> Optional[Dict[str, float]]:
-    values = outlets.get(stream_key)
-    if not isinstance(values, (list, tuple)) or len(values) < 4:
-        return None
-    comps = [as_float(values[i]) for i in range(4)]
-    if any(v is None for v in comps):
-        return None
-    return {
-        "GA": float(comps[0]),
-        "MA": float(comps[1]),
-        "Water": float(comps[2]),
-        "MeOH": float(comps[3]),
-    }
 
 
-def composition_metrics_from_result(result: Dict[str, object]) -> Optional[Dict[str, object]]:
-    source = "validated"
-    outlets_obj = result.get("outlets")
-    if not isinstance(outlets_obj, dict):
-        provisional = result.get("provisional")
-        if isinstance(provisional, dict) and isinstance(provisional.get("outlets"), dict):
-            outlets_obj = provisional.get("outlets")
-            source = "provisional"
-        else:
-            return None
-    outlets = outlets_obj  # narrowed to dict
-    ce = stream_components_from_outlets(outlets, "CE")
-    cr = stream_components_from_outlets(outlets, "CR")
-    if ce is None or cr is None:
-        return None
-    return {
-        "source": source,
-        "ce_acid": ce["GA"] + ce["MA"],
-        "ce_water": ce["Water"],
-        "ce_meoh": ce["MeOH"],
-        "cr_acid": cr["GA"] + cr["MA"],
-        "cr_water": cr["Water"],
-        "cr_meoh": cr["MeOH"],
-    }
 
 
-def composition_metrics_from_raw_json(raw_json: str) -> Optional[Dict[str, object]]:
-    if not raw_json:
-        return None
-    try:
-        payload = json.loads(raw_json)
-    except Exception:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return composition_metrics_from_result(payload)
 
 
-def linear_slope(xs: Sequence[Optional[float]], ys: Sequence[Optional[float]]) -> Optional[float]:
-    pairs = [(float(x), float(y)) for x, y in zip(xs, ys) if x is not None and y is not None]
-    if len(pairs) < 2:
-        return None
-    mean_x = sum(x for x, _ in pairs) / len(pairs)
-    mean_y = sum(y for _, y in pairs) / len(pairs)
-    var_x = sum((x - mean_x) ** 2 for x, _ in pairs)
-    if var_x <= 1e-12:
-        return None
-    cov_xy = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
-    return cov_xy / var_x
 
 
 def inferred_violation_from_metrics(metrics: Dict[str, object]) -> Optional[float]:
@@ -1245,11 +673,6 @@ def inferred_violation_from_metrics(metrics: Dict[str, object]) -> Optional[floa
     return norm
 
 
-def search_score(result: Dict[str, object]) -> Tuple[int, float, float]:
-    feasible = 1 if result.get("feasible") else 0
-    productivity = safe_result_metric(result, "productivity_ex_ga_ma") or float("-inf")
-    violation = effective_violation(result)
-    return feasible, productivity, -violation
 
 
 def bootstrap_reference_select(tasks: List[Dict[str, object]], tried: set[Tuple[Tuple[int, ...], str]]) -> int:
@@ -1262,8 +685,6 @@ def bootstrap_reference_select(tasks: List[Dict[str, object]], tried: set[Tuple[
     return deterministic_select(tasks, tried)
 
 
-def is_reference_seed_name(seed_name: object) -> bool:
-    return str(seed_name or "").strip().lower() == "reference"
 
 
 def low_fidelity_limits(args: argparse.Namespace) -> Dict[str, int]:
@@ -1274,14 +695,6 @@ def low_fidelity_limits(args: argparse.Namespace) -> Dict[str, int]:
     }
 
 
-def fidelity_triplet(result: Dict[str, object]) -> Optional[Tuple[int, int, int]]:
-    fidelity = result.get("fidelity")
-    if not isinstance(fidelity, dict):
-        return None
-    try:
-        return int(fidelity.get("nfex", 0)), int(fidelity.get("nfet", 0)), int(fidelity.get("ncp", 0))
-    except Exception:
-        return None
 
 
 def is_low_fidelity_result(result: Dict[str, object], args: argparse.Namespace) -> bool:
@@ -1292,15 +705,6 @@ def is_low_fidelity_result(result: Dict[str, object], args: argparse.Namespace) 
     return triplet[0] <= limits["nfex"] and triplet[1] <= limits["nfet"] and triplet[2] <= limits["ncp"]
 
 
-def has_metric_evidence(result: Dict[str, object]) -> bool:
-    status = str(result.get("status", "")).strip().lower()
-    if status in {"ok", "solver_error"}:
-        return True
-    return (
-        safe_result_metric(result, "purity_ex_meoh_free") is not None
-        or safe_result_metric(result, "recovery_ex_GA") is not None
-        or safe_result_metric(result, "productivity_ex_ga_ma") is not None
-    )
 
 
 def has_low_fidelity_reference_evidence_for_nc(
@@ -1337,8 +741,6 @@ def has_low_fidelity_optimization_evidence_for_nc(
     return False
 
 
-def reference_probe_runs_completed(results: List[Dict[str, object]]) -> int:
-    return sum(1 for item in results if is_reference_seed_name(item.get("seed_name")))
 
 
 def first_untried_reference_index(
@@ -1353,12 +755,8 @@ def first_untried_reference_index(
     return None
 
 
-def has_any_feasible(results: List[Dict[str, object]]) -> bool:
-    return any(bool(item.get("feasible")) for item in results)
 
 
-def ranked_reference_indices(tasks: List[Dict[str, object]]) -> List[int]:
-    return [idx for idx, task in enumerate(tasks) if str(task.get("seed_name", "")).strip().lower() == "reference"]
 
 
 def executive_forced_index(
@@ -1382,38 +780,6 @@ def executive_forced_index(
     return idx, "fallback to first untried task because all reference tasks are exhausted."
 
 
-def deterministic_review(candidate: Dict[str, object], best_result: Optional[Dict[str, object]]) -> Dict[str, object]:
-    if best_result and candidate["nc"] == best_result.get("nc") and candidate["seed_name"] == best_result.get("seed_name"):
-        return {
-            "decision": "reject",
-            "reason": "Already evaluated this layout and seed.",
-            "comparison_assessment": [
-                f"Compared against best prior run {best_result.get('run_name')} with same nc/seed; this would be a duplicate."
-            ],
-            "nc_strategy_assessment": [
-                "Candidate does not improve NC coverage because this nc/seed pair is already evaluated."
-            ],
-            "compute_assessment": "Reject duplicate to preserve budget for unexplored NC layouts and seeds.",
-            "priority_updates": ["Avoid duplicate nc/seed evaluations unless bounds or fidelity changed."],
-            "counterarguments": ["No new evidence is provided for a duplicate nc/seed attempt."],
-            "risk_flags": ["Wasted budget on duplicate search point."],
-            "required_checks": ["Only retry duplicates when bounds/fidelity or solver stack changed."],
-        }
-    return {
-        "decision": "approve",
-        "reason": "Candidate is within current bounds and still untested.",
-        "comparison_assessment": [
-            "Compared candidate against tried set and current best run; this nc/seed has not been executed yet."
-        ],
-        "nc_strategy_assessment": [
-            "Candidate expands NC/seed evidence coverage and can improve ranking confidence across layout alternatives."
-        ],
-        "compute_assessment": "Approve as a bounded, untried point with acceptable incremental budget impact.",
-        "priority_updates": ["Continue feasibility-first screening, then rank by productivity among low-violation runs."],
-        "counterarguments": ["Approval is provisional until solver status and post-check metrics are reviewed."],
-        "risk_flags": ["Potential local infeasibility despite bounded flows."],
-        "required_checks": ["Confirm effective post-bounds flow vector and solver termination condition."],
-    }
 
 
 def execute_search_task(
@@ -1684,41 +1050,84 @@ request_json_with_single_repair = split_llm.request_json_with_single_repair
 as_float = split_results.as_float
 layout_text = split_results.layout_text
 extract_metrics_with_validity = split_results.extract_metrics_with_validity
+safe_result_metric = split_results.safe_result_metric
 effective_flow = split_results.effective_flow
+stream_components_from_outlets = split_results.stream_components_from_outlets
+composition_metrics_from_result = split_results.composition_metrics_from_result
+composition_metrics_from_raw_json = split_results.composition_metrics_from_raw_json
+linear_slope = split_results.linear_slope
 effective_violation = split_results.effective_violation
+search_score = split_results.search_score
 summarize_result = split_results.summarize_result
 recent_two_run_review_context = split_results.recent_two_run_review_context
 rank_any_results = split_results.rank_any_results
 deterministic_select = split_results.deterministic_select
+is_reference_seed_name = split_results.is_reference_seed_name
+fidelity_triplet = split_results.fidelity_triplet
+has_metric_evidence = split_results.has_metric_evidence
+reference_probe_runs_completed = split_results.reference_probe_runs_completed
+ranked_reference_indices = split_results.ranked_reference_indices
+has_any_feasible = split_results.has_any_feasible
 
 normalize_text_list = split_evidence.normalize_text_list
+bottleneck_label = split_evidence.bottleneck_label
+compact_result_record = split_evidence.compact_result_record
 build_evidence_pack = split_evidence.build_evidence_pack
 contains_run_reference = split_evidence.contains_run_reference
+normalize_evidence_refs = split_evidence.normalize_evidence_refs
+build_evidence_fallback_items = split_evidence.build_evidence_fallback_items
 coerce_evidence_list = split_evidence.coerce_evidence_list
 coerce_grounded_evidence_refs = split_evidence.coerce_grounded_evidence_refs
 evidence_refs_are_grounded = split_evidence.evidence_refs_are_grounded
+text_mentions_prior_runs = split_evidence.text_mentions_prior_runs
+text_mentions_metric_signals = split_evidence.text_mentions_metric_signals
+text_mentions_numeric_values = split_evidence.text_mentions_numeric_values
+text_mentions_delta_metric_signals = split_evidence.text_mentions_delta_metric_signals
+count_flow_signal_mentions = split_evidence.count_flow_signal_mentions
+text_mentions_delta_flow_signals = split_evidence.text_mentions_delta_flow_signals
+text_mentions_run_name_signals = split_evidence.text_mentions_run_name_signals
+text_mentions_required_labels = split_evidence.text_mentions_required_labels
+text_mentions_flow_signals = split_evidence.text_mentions_flow_signals
+text_mentions_topology_signals = split_evidence.text_mentions_topology_signals
+text_mentions_physics_signals = split_evidence.text_mentions_physics_signals
+extract_nc_mentions = split_evidence.extract_nc_mentions
+review_references_candidate_nc = split_evidence.review_references_candidate_nc
+read_doc_excerpt = split_evidence.read_doc_excerpt
 compact_prompt_block = split_evidence.compact_prompt_block
 budget_evidence_pack_json = split_evidence.budget_evidence_pack_json
+markdown_focused_excerpt = split_evidence.markdown_focused_excerpt
+build_heuristics_context = split_evidence.build_heuristics_context
 hypothesis_matcher = split_evidence.hypothesis_matcher
 failure_recovery_context = split_evidence.failure_recovery_context
+apply_flow_adjustments = split_evidence.apply_flow_adjustments
+build_task_from_counterproposal = split_evidence.build_task_from_counterproposal
 
 open_sqlite_db = split_db.open_sqlite_db
 persist_result_to_sqlite = split_db.persist_result_to_sqlite
 record_convergence_snapshot = split_db.record_convergence_snapshot
+sqlite_convergence_context = split_db.sqlite_convergence_context
+sqlite_targeted_query = split_db.sqlite_targeted_query
 sqlite_history_context = split_db.sqlite_history_context
 sqlite_record_count = split_db.sqlite_record_count
 sqlite_layout_trend_table = split_db.sqlite_layout_trend_table
 read_research_tail = split_db.read_research_tail
 append_research = split_db.append_research
+reset_research_run_section = split_db.reset_research_run_section
 append_iteration_research = split_db.append_iteration_research
 append_result_research = split_db.append_result_research
+append_final_research = split_db.append_final_research
 merge_priority_board = split_db.merge_priority_board
 
+env_or_default = split_policy.env_or_default
+nc_key = split_policy.nc_key
+nc_prior_score = split_policy.nc_prior_score
+sqlite_total_records_from_excerpt = split_policy.sqlite_total_records_from_excerpt
 configure_stage_args = split_policy.configure_stage_args
 build_search_tasks = split_policy.build_search_tasks
 apply_probe_reference_gate = split_policy.apply_probe_reference_gate
 probe_reference_runs_required = split_policy.probe_reference_runs_required
 search_execution_policy = split_policy.search_execution_policy
+deterministic_review = split_policy.deterministic_review
 single_scientist_policy_review = split_policy.single_scientist_policy_review
 executive_controller_decide = split_policy.executive_controller_decide
 physics_informed_select = split_policy.physics_informed_select
