@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import sys
 import types
@@ -13,8 +14,10 @@ IMPORT_ROOT = PROJECT_ROOT if PROJECT_ROOT.exists() else REPO_ROOT
 if str(IMPORT_ROOT) not in sys.path:
     sys.path.insert(0, str(IMPORT_ROOT))
 
-# Keep unit tests independent from optional solver deps.
-if "pyomo.environ" not in sys.modules:
+# Keep unit tests independent from optional solver deps only when pyomo is
+# genuinely unavailable. Avoid poisoning the full test session when real pyomo
+# is installed for integration-style tests.
+if "pyomo.environ" not in sys.modules and importlib.util.find_spec("pyomo.environ") is None:
     pyomo_mod = types.ModuleType("pyomo")
     pyomo_env_mod = types.ModuleType("pyomo.environ")
     pyomo_env_mod.value = lambda x: x

@@ -17,6 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 # Ensure src/ is on the path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -39,15 +41,23 @@ def build_test_model(nc=(2, 2, 2, 2), nfex=4, nfet=2, ncp=1):
     return m, inputs, config
 
 
+def require_available_solver() -> str:
+    """Skip environment-dependent solve tests when IPOPT is unavailable."""
+    from sembasmb import check_solver_available
+
+    for solver in ("ipopt", "ipopt_sens"):
+        if check_solver_available(solver):
+            return solver
+    pytest.skip("Neither ipopt nor ipopt_sens found on PATH")
+
+
 def test_solver_available():
     """Check that IPOPT is available."""
     from sembasmb import check_solver_available
     for solver in ['ipopt', 'ipopt_sens']:
         available = check_solver_available(solver)
         print(f"  {solver}: {'available' if available else 'NOT FOUND'}")
-    # At least one must be available
-    assert check_solver_available('ipopt') or check_solver_available('ipopt_sens'), \
-        "Neither ipopt nor ipopt_sens found on PATH"
+    require_available_solver()
 
 
 def test_model_builds():
@@ -63,6 +73,7 @@ def test_direct_solve_low_fidelity():
     from sembasmb import add_optimization, solve_model, default_ipopt_options
     from sembasmb import compute_outlet_averages, compute_purity_recovery
 
+    solver_name = require_available_solver()
     m, inputs, config = build_test_model()
     add_optimization(m, inputs, purity_min=0.60, recovery_min_ga=0.75, recovery_min_ma=0.75)
 
@@ -72,7 +83,7 @@ def test_direct_solve_low_fidelity():
     options['print_level'] = 5  # Full IPOPT iteration table
 
     start = time.perf_counter()
-    results = solve_model(m, solver_name='ipopt', options=options, tee=True)
+    results = solve_model(m, solver_name=solver_name, options=options, tee=True)
     elapsed = time.perf_counter() - start
 
     term = str(results.solver.termination_condition)
@@ -105,6 +116,7 @@ def test_two_phase_solve():
         compute_outlet_averages, compute_purity_recovery,
     )
 
+    solver_name = require_available_solver()
     m, inputs, config = build_test_model()
     add_optimization(m, inputs, purity_min=0.60, recovery_min_ga=0.75, recovery_min_ma=0.75)
 
@@ -117,7 +129,7 @@ def test_two_phase_solve():
     phase1_options['print_level'] = 5  # Full IPOPT iteration table
 
     start = time.perf_counter()
-    phase1_results = solve_model(m, solver_name='ipopt', options=phase1_options, tee=True)
+    phase1_results = solve_model(m, solver_name=solver_name, options=phase1_options, tee=True)
     phase1_elapsed = time.perf_counter() - start
 
     phase1_term = str(phase1_results.solver.termination_condition)
@@ -144,7 +156,7 @@ def test_two_phase_solve():
     phase2_options['print_level'] = 5  # Full IPOPT iteration table
 
     start = time.perf_counter()
-    phase2_results = solve_model(m, solver_name='ipopt', options=phase2_options, tee=True)
+    phase2_results = solve_model(m, solver_name=solver_name, options=phase2_options, tee=True)
     phase2_elapsed = time.perf_counter() - start
 
     phase2_term = str(phase2_results.solver.termination_condition)
@@ -171,6 +183,7 @@ def test_multiple_layouts():
         compute_outlet_averages, compute_purity_recovery,
     )
 
+    solver_name = require_available_solver()
     layouts = [(1, 2, 3, 2), (2, 2, 2, 2), (1, 3, 2, 2), (2, 1, 3, 2)]
     results = []
 
@@ -185,7 +198,7 @@ def test_multiple_layouts():
 
         start = time.perf_counter()
         try:
-            res = solve_model(m, solver_name='ipopt', options=options, tee=True)
+            res = solve_model(m, solver_name=solver_name, options=options, tee=True)
             term = str(res.solver.termination_condition)
         except Exception as exc:
             term = f"error: {exc}"
@@ -203,8 +216,7 @@ def test_multiple_layouts():
 
         results.append((nc, term, elapsed, purity, prod))
         print(f"  nc={nc}: {term} ({elapsed:.1f}s) purity={purity} prod={prod}")
-
-    return results
+    assert len(results) == len(layouts)
 
 
 def test_warm_start_from_reference():
@@ -223,6 +235,7 @@ def test_warm_start_from_reference():
         compute_outlet_averages, compute_purity_recovery,
     )
 
+    solver_name = require_available_solver()
     nc = (2, 2, 2, 2)
     nfex, nfet, ncp = 4, 2, 1
 
@@ -239,7 +252,7 @@ def test_warm_start_from_reference():
     options['print_level'] = 5  # Full IPOPT iteration table
 
     start = time.perf_counter()
-    ref_results = solve_model(m_ref, solver_name='ipopt', options=options, tee=True)
+    ref_results = solve_model(m_ref, solver_name=solver_name, options=options, tee=True)
     ref_elapsed = time.perf_counter() - start
     ref_term = str(ref_results.solver.termination_condition)
     print(f"  Reference solve: {ref_term} in {ref_elapsed:.1f}s")
@@ -273,7 +286,7 @@ def test_warm_start_from_reference():
     p1_options['print_level'] = 5  # Full IPOPT iteration table
 
     start = time.perf_counter()
-    p1_results = solve_model(m_warm, solver_name='ipopt', options=p1_options, tee=True)
+    p1_results = solve_model(m_warm, solver_name=solver_name, options=p1_options, tee=True)
     p1_elapsed = time.perf_counter() - start
     p1_term = str(p1_results.solver.termination_condition)
     print(f"  Warm-start Phase 1: {p1_term} in {p1_elapsed:.1f}s")
@@ -285,7 +298,7 @@ def test_warm_start_from_reference():
     p2_options['print_level'] = 5  # Full IPOPT iteration table
 
     start = time.perf_counter()
-    p2_results = solve_model(m_warm, solver_name='ipopt', options=p2_options, tee=True)
+    p2_results = solve_model(m_warm, solver_name=solver_name, options=p2_options, tee=True)
     p2_elapsed = time.perf_counter() - start
     p2_term = str(p2_results.solver.termination_condition)
     print(f"  Warm-start Phase 2: {p2_term} in {p2_elapsed:.1f}s")

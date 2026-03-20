@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 import types
 from argparse import Namespace
@@ -18,8 +19,9 @@ if str(BENCHMARKS_ROOT) not in sys.path:
     sys.path.insert(0, str(BENCHMARKS_ROOT))
 
 # run_stage.py imports pyomo.environ at module import time. Stub the minimum
-# surface needed for these unit tests so we do not require a full solver stack.
-if "pyomo.environ" not in sys.modules:
+# surface only when pyomo is genuinely unavailable so the full suite can still
+# exercise real pyomo modules later in the same session.
+if "pyomo.environ" not in sys.modules and importlib.util.find_spec("pyomo.environ") is None:
     pyomo_mod = types.ModuleType("pyomo")
     pyomo_env_mod = types.ModuleType("pyomo.environ")
     pyomo_env_mod.value = lambda x: x

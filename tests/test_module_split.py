@@ -515,3 +515,61 @@ class TestCrossModuleConsistency:
         from benchmarks.agent_db import compact_prompt_block as cpb_db
         text = "hello world\nhello world"
         assert cpb_evidence(text) == cpb_db(text)
+
+
+class TestAgentRunnerDelegation:
+    def test_agent_runner_uses_split_scientist_entrypoints(self):
+        from benchmarks import agent_runner
+        from benchmarks import agent_scientists
+
+        assert agent_runner.default_initial_priority_plan is agent_scientists.default_initial_priority_plan
+        assert agent_runner.initial_priority_plan is agent_scientists.initial_priority_plan
+        assert agent_runner.scientist_a_pick is agent_scientists.scientist_a_pick
+        assert agent_runner.scientist_b_review is agent_scientists.scientist_b_review
+        assert agent_runner.scientist_c_arbitrate is agent_scientists.scientist_c_arbitrate
+
+    def test_agent_runner_uses_split_policy_entrypoints(self):
+        from benchmarks import agent_runner
+        from benchmarks import agent_policy
+
+        assert agent_runner.configure_stage_args is agent_policy.configure_stage_args
+        assert agent_runner.build_search_tasks is agent_policy.build_search_tasks
+        assert agent_runner.apply_probe_reference_gate is agent_policy.apply_probe_reference_gate
+        assert agent_runner.probe_reference_runs_required is agent_policy.probe_reference_runs_required
+        assert agent_runner.search_execution_policy is agent_policy.search_execution_policy
+        assert agent_runner.single_scientist_policy_review is agent_policy.single_scientist_policy_review
+        assert agent_runner.executive_controller_decide is agent_policy.executive_controller_decide
+        assert agent_runner.physics_informed_select is agent_policy.physics_informed_select
+        assert agent_runner.check_systematic_infeasibility is agent_policy.check_systematic_infeasibility
+
+    def test_agent_runner_uses_split_db_evidence_results_and_llm_entrypoints(self):
+        from benchmarks import agent_db
+        from benchmarks import agent_evidence
+        from benchmarks import agent_llm_client
+        from benchmarks import agent_results
+        from benchmarks import agent_runner
+
+        assert agent_runner.open_sqlite_db is agent_db.open_sqlite_db
+        assert agent_runner.persist_result_to_sqlite is agent_db.persist_result_to_sqlite
+        assert agent_runner.record_convergence_snapshot is agent_db.record_convergence_snapshot
+        assert agent_runner.sqlite_history_context is agent_db.sqlite_history_context
+        assert agent_runner.sqlite_layout_trend_table is agent_db.sqlite_layout_trend_table
+        assert agent_runner.append_iteration_research is agent_db.append_iteration_research
+        assert agent_runner.append_result_research is agent_db.append_result_research
+        assert agent_runner.merge_priority_board is agent_db.merge_priority_board
+
+        assert agent_runner.build_evidence_pack is agent_evidence.build_evidence_pack
+        assert agent_runner.coerce_evidence_list is agent_evidence.coerce_evidence_list
+        assert agent_runner.coerce_grounded_evidence_refs is agent_evidence.coerce_grounded_evidence_refs
+        assert agent_runner.compact_prompt_block is agent_evidence.compact_prompt_block
+        assert agent_runner.failure_recovery_context is agent_evidence.failure_recovery_context
+        assert agent_runner.hypothesis_matcher is agent_evidence.hypothesis_matcher
+
+        assert agent_runner.as_float is agent_results.as_float
+        assert agent_runner.effective_flow is agent_results.effective_flow
+        assert agent_runner.effective_violation is agent_results.effective_violation
+        assert agent_runner.rank_any_results is agent_results.rank_any_results
+        assert agent_runner.summarize_result is agent_results.summarize_result
+
+        assert agent_runner.OpenAICompatClient is agent_llm_client.OpenAICompatClient
+        assert agent_runner.request_json_with_single_repair is agent_llm_client.request_json_with_single_repair

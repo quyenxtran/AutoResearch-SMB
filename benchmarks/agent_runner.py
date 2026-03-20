@@ -18,6 +18,12 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from urllib import error, request
 
 from . import run_stage as rs
+from . import agent_db as split_db
+from . import agent_evidence as split_evidence
+from . import agent_llm_client as split_llm
+from . import agent_policy as split_policy
+from . import agent_results as split_results
+from . import agent_scientists as split_scientists
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -3475,114 +3481,71 @@ def scientist_a_pick(
         prompt = textwrap.dedent(
             f"""
             You are Scientist_A for SMB optimization.
-            Be concise and evidence-first.
-            Ground each proposal in data + physics + heuristics.
-            Compare against prior runs before proposing the next run.
+            Select one candidate from the shortlist. Return ONLY the JSON below. Do not repeat context.
 
-            Objective summary:
-            {objectives_compact}
+            Candidate shortlist (select by 0-based index):
+            {json.dumps(shortlist_brief, separators=(",", ":"))}
 
-            Scientist rules summary:
-            {soul_compact}
+            Respond with this JSON (fill every field with real evidence — no placeholders):
+            {{
+              "candidate_index": <integer 0..{len(shortlist)-1}>,
+              "reason": "<1-2 sentences citing run_name and numeric metric>",
+              "acquisition_type": "EXPLORE | EXPLOIT | VERIFY",
+              "information_target": "<what does this run answer that prior runs do not?>",
+              "coverage_gap": "<untested NC / flow region / hypothesis this fills>",
+              "hypothesis_connection": "<hypothesis or failure mode ID this tests>",
+              "convergence_assessment": "<improving / stagnating / shift strategy?>",
+              "evidence_refs": ["<run_name from evidence pack>"],
+              "evidence": ["<metric from a named prior run>", "..."],
+              "comparison_to_previous": ["<named run: metric delta + interpretation>", "..."],
+              "last_two_run_comparison": ["<R-1: run_name feasible=? prod=? purity=? viol=?>", "<R-2: ...>"],
+              "flowrate_comparison": ["<ΔFfeed=..., ΔF1=..., ΔFdes=..., ΔFex=..., ΔFraf=..., Δtstep=...>"],
+              "delta_summary": ["<vs R-1: Δprod=..., Δpurity=..., ΔrGA=..., ΔrMA=..., Δviol=...>", "<vs R-2: ...>"],
+              "column_topology_comparison": ["<vs R-1: nc=[...]->[...], ΔZ1=..ΔZ4=..>", "<vs R-2: ...>"],
+              "physics_rationale": "<zone I-IV mechanics or mass balance argument>",
+              "alternatives_considered": ["<rejected index/nc and why>", "..."],
+              "priority_updates": ["..."]
+            }}
 
-            Codebase context summary:
-            {codebase_compact}
+            === CONTEXT (evidence-grounded answers must reference entries below) ===
 
-            Runtime compute context:
-            {compute_compact}
-
-            Simulation objective/constraint context:
-            {constraint_compact}
-
-            Evidence pack (PRIMARY SOURCE; use run_name references from this block):
-            {evidence_compact}
-
-            Accumulated heuristics (hypotheses and known failure modes):
-            {heuristics_compact}
-
-            Relevant hypotheses:
-            {compact_prompt_block(hypothesis_compact, max_chars=700, max_lines=20)}
-
-            Failure recovery context:
-            {compact_prompt_block(failure_compact, max_chars=700, max_lines=20)}
-
-            Convergence progress:
-            {convergence_compact}
-
-            Current research log tail:
-            {research_compact}
-
-            NC strategy board (all layouts in current library):
-            {nc_strategy_compact}
-
-            Current priority board:
-            {priorities_compact}
-
-            Historical simulation context (queried from SQLite):
-            {sqlite_compact}
-
-            Counted benchmark budget is {args.benchmark_hours:.1f} SMB hours with {args.search_hours:.1f} search hours and {args.validation_hours:.1f} validation hours.
-            Search wall-hours used so far: {budget_used:.4f}
-            Hard policy: complete at least {int(getattr(args, "min_probe_reference_runs", 0))} reference-seed probe runs before proposing non-reference seed optimization.
-            Hard policy: final high-fidelity optimization is allowed only after low-fidelity reference and low-fidelity non-reference optimization evidence exist on the same NC.
+            Hard project targets: purity_ex_meoh_free>=0.60, recovery_GA>=0.75, recovery_MA>=0.75.
+            Mass balance invariant: F1=Ffeed+Fraf=Fdes+Fex (±1%). Feasibility first, then optimize.
+            Budget: {args.benchmark_hours:.1f}h total, {args.search_hours:.1f}h search, {budget_used:.4f}h used.
+            Min reference probes required before non-reference seeds: {int(getattr(args, "min_probe_reference_runs", 0))}.
 
             Current best result:
             {summarize_result(best) if best else "None yet."}
 
-            Recent two completed runs (must be reviewed deeply when available):
+            Recent two completed runs (R-1 most recent, R-2 second):
             {recent_two_compact}
 
-            Required rigor:
-            - compare candidate NC against at least two alternative NC layouts from the strategy board
-            - compare candidate against previous result evidence (current best + recent failure when available)
-            - include quantitative metric evidence in comparisons (at least one of: productivity, purity, recovery, violation, feasible/J)
-            - include explicit run references from evidence pack (run_name tokens) in reason/comparisons/physics rationale
-            - when two prior runs exist, include explicit deep comparison to BOTH R-1 and R-2 using run_name and metric deltas
-            - include explicit flowrate comparisons (Ffeed/F1/Fdes/Fex/Fraf/tstep) across at least two prior runs
-            - include explicit delta vectors using this schema token style: Δprod, Δpurity, ΔrGA, ΔrMA, Δviol, ΔFfeed, ΔF1, ΔFdes, ΔFex, ΔFraf, Δtstep
-            - include explicit column topology comparison (nc and zone-column deltas, e.g., ΔZ1..ΔZ4) against R-1, R-2, and one competitor
-            - include physics-based rationale (mass balance, zone allocation effects, adsorption/desorption/selectivity), not rank-only claims
-            - include explicit compute/budget impact and stopping/failure criteria
+            Evidence pack — cite run_name values from here in evidence_refs:
+            {evidence_compact}
 
-            Acquisition strategy requirement (MANDATORY):
-            - classify this proposal as exactly one of: EXPLORE, EXPLOIT, or VERIFY
-            - state what this run will teach that we don't already know (information_target)
-            - list at least 2 alternative candidates considered and why they were rejected
-            - identify the coverage gap this fills (untested NC, unexplored flow region, untested hypothesis)
-            - reference at least one hypothesis from hypotheses.json that this run tests or one failure mode from failures.json that it risks
-            - assess convergence: are we improving? stagnating? should we shift strategy?
+            NC strategy board:
+            {nc_strategy_compact}
 
-            Remaining candidate shortlist:
-            {json.dumps(shortlist_brief, separators=(",", ":"))}
+            Current priorities:
+            {priorities_compact}
 
-            Respond with JSON only:
-            {{
-              "candidate_index": <0-based index into shortlist>,
-              "reason": "<brief reason>",
-              "evidence_refs": ["<run_name from evidence pack>", "..."],
-              "acquisition_type": "EXPLORE | EXPLOIT | VERIFY",
-              "information_target": "<what will this run teach us that we don't already know?>",
-              "alternatives_considered": ["<candidate X rejected because...>", "<candidate Y rejected because...>"],
-              "coverage_gap": "<what untested NC / flow region / hypothesis does this fill?>",
-              "hypothesis_connection": "<which hypothesis ID from hypotheses.json does this test, or which failure mode ID does it risk?>",
-              "convergence_assessment": "<are we improving? stagnating? should we shift strategy?>",
-              "evidence": ["<specific evidence item>", "..."],
-              "comparison_to_previous": ["<explicit comparison to named prior run with metric/termination evidence>", "..."],
-              "last_two_run_comparison": ["<R-1: run_name + metrics + what changed>", "<R-2: run_name + metrics + what changed>"],
-              "flowrate_comparison": ["<flow deltas across runs with Ffeed/F1/Fdes/Fex/Fraf/tstep and implication>", "..."],
-              "delta_summary": ["<vs R-1: Δprod=..., Δpurity=..., ΔrGA=..., ΔrMA=..., Δviol=..., ΔFfeed=..., ΔF1=..., ΔFdes=..., ΔFex=..., ΔFraf=..., Δtstep=...>", "<vs R-2: ...>", "<vs competitor nc=[...]: Δprod=..., Δpurity=..., ΔrGA=..., ΔrMA=..., Δviol=...>"],
-              "column_topology_comparison": ["<vs R-1: nc=[a,b,c,d] -> candidate=[...], ΔZ1=..., ΔZ2=..., ΔZ3=..., ΔZ4=... and expected impact>", "<vs R-2: ...>", "<vs competitor nc=[...]: topology/zone tradeoff>"],
-              "physics_rationale": "<physics-based explanation using zones, flow splits, mass-transfer or mass-balance logic>",
-              "nc_competitor_comparison": ["<candidate nc vs two alternatives with rationale>", "..."],
-              "diagnostic_hypothesis": "<what this run is testing>",
-              "failure_criteria": ["<what would make this a bad proposal>", "..."],
-              "fidelity": "medium",
-              "priority_updates": ["..."],
-              "proposed_followups": ["..."]
-            }}
+            Operating principles:
+            {soul_compact}
+
+            Project objectives and constraints:
+            {objectives_compact}
+
+            Heuristics and failure modes:
+            {heuristics_compact}
+
+            SQLite history:
+            {sqlite_compact}
+
+            Research log tail:
+            {research_compact}
             """
         ).strip()
-        prompt = compact_prompt_block(prompt, max_chars=3200, max_lines=105)
+        prompt = compact_prompt_block(prompt, max_chars=8000, max_lines=260)
     except Exception as exc:
         prompt_warning = f"Prompt build warning: {type(exc).__name__}: {exc}"
         prompt = (
@@ -3951,84 +3914,75 @@ def scientist_b_review(
     try:
         prompt = textwrap.dedent(
             f"""
-            You are Scientist_B. Review this proposed SMB medium-fidelity optimization attempt.
-            Be adversarial and skeptical by default.
-            Reject if rationale is generic, evidence is weak, or compute/constraint tradeoffs are ignored.
-            You must explicitly compare the proposal against previous results before deciding.
+            You are Scientist_B. Review the proposed SMB candidate. Return ONLY the JSON below.
+            Reject if evidence is generic, mass balance is violated, or the region is proven infeasible.
+            If you approve, still provide the strongest counterarguments and required checks.
 
-            Reviewer operating principles:
-            {soul_compact}
-            If you approve, still provide the strongest counterarguments and explicit risk checks.
-
-            Proposed task:
+            Proposed candidate:
             {json.dumps(proposed_task_brief, separators=(",", ":"))}
 
-            Effective bounded candidate that will actually be executed:
+            Effective bounded candidate (actual flows to be run):
             {json.dumps(effective_task_brief, separators=(",", ":"))}
 
-            Current best result:
-            {summarize_result(best_result) if best_result else "None yet."}
-
-            Recent two completed runs (must be reviewed deeply when available):
-            {recent_two_compact}
-
-            Codebase context summary:
-            {codebase_compact}
-
-            Runtime compute context:
-            {compute_compact}
-
-            Simulation objective/constraint context:
-            {constraint_compact}
-
-            NC strategy board (all layouts in current library):
-            {nc_strategy_compact}
-
-            Current research log tail:
-            {research_compact}
-
-            Current priority board:
-            {priorities_compact}
-
-            Known failure modes (avoid repeating these patterns):
-            {failure_compact}
-
-            Heuristics and hypotheses context:
-            {heuristics_compact}
-
-            Historical simulation context (queried from SQLite):
-            {sqlite_compact}
-
-            Evidence pack (PRIMARY SOURCE; reference run_name tokens from this block):
-            {evidence_compact}
-
-            Respond with JSON only:
+            Respond with this JSON (fill every field — no placeholders):
             {{
               "decision": "approve" or "reject",
-              "reason": "<brief reason>",
-              "evidence_refs": ["<run_name from evidence pack>", "..."],
-              "comparison_assessment": ["<explicit comparison vs prior run(s) with quantitative metric/termination evidence>", "..."],
-              "last_two_run_audit": ["<R-1: what happened, metrics, implications>", "<R-2: what happened, metrics, implications>"],
-              "flowrate_audit": ["<flow deltas across runs with Ffeed/F1/Fdes/Fex/Fraf/tstep and implications>", "..."],
-              "delta_audit": ["<vs R-1: Δprod=..., Δpurity=..., ΔrGA=..., ΔrMA=..., Δviol=..., ΔFfeed=..., ΔF1=..., ΔFdes=..., ΔFex=..., ΔFraf=..., Δtstep=...>", "<vs R-2: ...>", "<proposal vs counterproposal: Δprod=..., Δpurity=..., ΔrGA=..., ΔrMA=..., Δviol=...>"],
-              "column_topology_audit": ["<vs R-1: nc=[...]->[...], ΔZ1=..., ΔZ2=..., ΔZ3=..., ΔZ4=..., implication>", "<vs R-2: ...>", "<proposal vs counterproposal topology tradeoff>"],
-              "physics_audit": "<physics-grounded critique (mass balance, zone effects, adsorption/desorption/selectivity)>",
+              "reason": "<1-2 sentences citing run_name and numeric evidence>",
+              "evidence_refs": ["<run_name from evidence pack>"],
+              "comparison_assessment": ["<named run vs proposal: metric delta + interpretation>", "..."],
+              "last_two_run_audit": ["<R-1: run_name feasible=? prod=? purity=? viol=?>", "<R-2: ...>"],
+              "flowrate_audit": ["<ΔFfeed=..., ΔF1=..., ΔFdes=..., ΔFex=..., ΔFraf=..., Δtstep=...>"],
+              "delta_audit": ["<vs R-1: Δprod=..., Δpurity=..., ΔrGA=..., ΔrMA=..., Δviol=...>", "<vs R-2: ...>", "<vs counterproposal: ...>"],
+              "column_topology_audit": ["<vs R-1: nc=[...]->[...], ΔZ1..ΔZ4>", "<vs R-2: ...>", "<vs counterproposal topology>"],
+              "physics_audit": "<zone I-IV mass balance / selectivity critique>",
               "counterproposal_run": {{
                 "nc": [a,b,c,d],
-                "flow_adjustments": {{"Ffeed": <delta>, "F1": <delta>, "Fdes": <delta>, "Fex": <delta>, "Fraf": <delta>, "tstep": <delta>}},
-                "expected_metric_effect": {{"delta_productivity": <value>, "delta_purity": <value>, "delta_recovery_ga": <value>, "delta_recovery_ma": <value>, "delta_violation": <value>}},
-                "physics_justification": "<physics-based reason for this counterproposal>"
+                "flow_adjustments": {{"Ffeed": 0.0, "F1": 0.0, "Fdes": 0.0, "Fex": 0.0, "Fraf": 0.0, "tstep": 0.0}},
+                "expected_metric_effect": {{"delta_productivity": 0.0, "delta_purity": 0.0, "delta_recovery_ga": 0.0, "delta_recovery_ma": 0.0, "delta_violation": 0.0}},
+                "physics_justification": "<why this counterproposal is better>"
               }},
-              "nc_strategy_assessment": ["<candidate nc vs alternatives and why>", "..."],
-              "compute_assessment": "<budget/time parallelism assessment>",
-              "counterarguments": ["<strongest objection 1>", "..."],
+              "nc_strategy_assessment": ["<candidate nc vs alternatives with evidence>", "..."],
+              "compute_assessment": "<budget/time assessment>",
+              "counterarguments": ["<strongest objection>", "..."],
               "required_checks": ["<check before trusting result>", "..."],
               "priority_updates": ["..."],
               "risk_flags": ["..."]
             }}
+
+            === CONTEXT ===
+
+            Hard project targets: purity_ex_meoh_free>=0.60, recovery_GA>=0.75, recovery_MA>=0.75.
+            Mass balance: F1=Ffeed+Fraf=Fdes+Fex (±1%). Any violation is a Hard Block.
+
+            Current best result:
+            {summarize_result(best_result) if best_result else "None yet."}
+
+            Recent two completed runs (R-1 most recent, R-2 second):
+            {recent_two_compact}
+
+            Evidence pack — cite run_name values from here in evidence_refs:
+            {evidence_compact}
+
+            NC strategy board:
+            {nc_strategy_compact}
+
+            Current priorities:
+            {priorities_compact}
+
+            Reviewer operating principles:
+            {soul_compact}
+
+            Known failure modes:
+            {failure_compact}
+
+            Heuristics and hypotheses:
+            {heuristics_compact}
+
+            SQLite history:
+            {sqlite_compact}
             """
         ).strip()
-        prompt = compact_prompt_block(prompt, max_chars=22000, max_lines=660)
+        prompt = compact_prompt_block(prompt, max_chars=8000, max_lines=260)
     except Exception as exc:
         prompt_warning = f"Prompt build warning: {type(exc).__name__}: {exc}"
         prompt = (
@@ -4433,16 +4387,33 @@ def scientist_c_arbitrate(
         prompt = textwrap.dedent(
             f"""
             You are Scientist_C, the executive arbiter for SMB search.
-            Choose exactly one taxonomy label:
-            IMPLEMENT_A, IMPLEMENT_B_COUNTER, IMPLEMENT_HYBRID, RETURN_FOR_REVISION, FORCE_DIAGNOSTIC.
+            Rule on the A vs B disagreement. Return ONLY the JSON below.
 
-            Arbitration protocol:
-            {soul_compact}
-            Be strict about physics, evidence quality, and budget impact.
-            If the B counterproposal is weak or inconsistent, prefer revision or diagnostic over blind execution.
+            Respond with this JSON (no placeholders — cite evidence_refs from the bundle below):
+            {{
+              "decision": "IMPLEMENT_A | IMPLEMENT_B_COUNTER | IMPLEMENT_HYBRID | RETURN_FOR_REVISION | FORCE_DIAGNOSTIC",
+              "reason": "<1-2 sentences citing run_name and physics argument>",
+              "selected_task_mode": "A | B_COUNTER | HYBRID | REVISION | DIAGNOSTIC",
+              "acquisition_type": "<compact label>",
+              "evidence_refs": ["<run_name from evidence bundle>"],
+              "diagnostic_focus": "<what to test if FORCE_DIAGNOSTIC>",
+              "revision_request": "<what to fix if RETURN_FOR_REVISION>",
+              "priority_updates": ["..."]
+            }}
 
-            Current candidate:
-            {json.dumps({"nc": list(task.get("nc", [])), "seed_name": str(task.get("seed_name", "")), "flow": effective_task.get("flow", {})}, separators=(",", ":"))}
+            Taxonomy rules:
+            - IMPLEMENT_A: A correct, B objection is not a Hard Block
+            - IMPLEMENT_B_COUNTER: B's counterproposal is fully specified and physics-grounded
+            - IMPLEMENT_HYBRID: merge A's topology with B's flow adjustment (only if both are evidence-grounded)
+            - RETURN_FOR_REVISION: Soft Block, one bounded revision warranted (revision_count < max)
+            - FORCE_DIAGNOSTIC: circular debate, stuck region, or hard evidence contradiction
+
+            Hard Block (always reject): mass balance violation, proven infeasible NC, fidelity jump without evidence.
+            Anti-stall: 3 consecutive RETURN_FOR_REVISION → escalate to FORCE_DIAGNOSTIC.
+
+            === CONTEXT ===
+
+            Candidate: {json.dumps({"nc": list(task.get("nc", [])), "seed_name": str(task.get("seed_name", "")), "flow": effective_task.get("flow", {})}, separators=(",", ":"))}
 
             Scientist_A summary:
             {json.dumps(a_brief, separators=(",", ":"))}
@@ -4456,45 +4427,26 @@ def scientist_c_arbitrate(
             Recent two completed runs:
             {recent_two_compact}
 
-            Current priority board:
-            {priorities_compact}
+            Evidence bundle — cite run_name values from here:
+            {evidence_compact}
 
-            NC strategy board (layout history — use to arbitrate topology disagreements):
+            NC strategy board:
             {nc_strategy_compact}
 
-            Hypotheses:
+            Arbitration principles:
+            {soul_compact}
+
+            Hypotheses and failure context:
             {hypothesis_compact}
 
-            Failure recovery context:
-            {failure_compact}
-
-            Heuristics summary:
+            Heuristics:
             {heuristics_compact}
 
             SQLite context:
             {sqlite_compact}
-
-            Evidence bundle (PRIMARY SOURCE; cite run_name references from this block):
-            {evidence_compact}
-
-            If you choose RETURN_FOR_REVISION, keep the request bounded and actionable.
-            If revision pressure is already high, switch to FORCE_DIAGNOSTIC.
-            If a diagnostic is needed, prefer a task that tests the suspected failure mode directly.
-
-            Respond with JSON only:
-            {{
-              "decision": "IMPLEMENT_A | IMPLEMENT_B_COUNTER | IMPLEMENT_HYBRID | RETURN_FOR_REVISION | FORCE_DIAGNOSTIC",
-              "reason": "<brief reason>",
-              "priority_updates": ["..."],
-              "diagnostic_focus": "<what to test if forcing diagnostic>",
-              "revision_request": "<what revision should address>",
-              "selected_task_mode": "<A | B_COUNTER | HYBRID | DIAGNOSTIC>",
-              "acquisition_type": "<compact label for logging>",
-              "evidence_refs": ["<run_name from evidence bundle>", "..."]
-            }}
             """
         ).strip()
-        prompt = compact_prompt_block(prompt, max_chars=20000, max_lines=600)
+        prompt = compact_prompt_block(prompt, max_chars=7000, max_lines=230)
         data, raw, _repaired, _repair_error = request_json_with_single_repair(
             exec_client,
             system_prompt="You are a decisive process executive. Return JSON only.",
@@ -4881,6 +4833,63 @@ def write_conversation_log(path: Path, payload: Dict[str, object]) -> None:
 def progress_log(message: str) -> None:
     """Emit compact progress markers into Slurm stdout for bottleneck diagnosis."""
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
+
+
+# Runtime delegation bridge: keep legacy implementations import-compatible while
+# switching the live orchestration path to the extracted split modules.
+utc_now_text = split_llm.utc_now_text
+required_keys_missing = split_llm.required_keys_missing
+OpenAICompatClient = split_llm.OpenAICompatClient
+request_json_with_single_repair = split_llm.request_json_with_single_repair
+
+as_float = split_results.as_float
+layout_text = split_results.layout_text
+extract_metrics_with_validity = split_results.extract_metrics_with_validity
+effective_flow = split_results.effective_flow
+effective_violation = split_results.effective_violation
+summarize_result = split_results.summarize_result
+recent_two_run_review_context = split_results.recent_two_run_review_context
+rank_any_results = split_results.rank_any_results
+deterministic_select = split_results.deterministic_select
+
+normalize_text_list = split_evidence.normalize_text_list
+build_evidence_pack = split_evidence.build_evidence_pack
+contains_run_reference = split_evidence.contains_run_reference
+coerce_evidence_list = split_evidence.coerce_evidence_list
+coerce_grounded_evidence_refs = split_evidence.coerce_grounded_evidence_refs
+evidence_refs_are_grounded = split_evidence.evidence_refs_are_grounded
+compact_prompt_block = split_evidence.compact_prompt_block
+budget_evidence_pack_json = split_evidence.budget_evidence_pack_json
+hypothesis_matcher = split_evidence.hypothesis_matcher
+failure_recovery_context = split_evidence.failure_recovery_context
+
+open_sqlite_db = split_db.open_sqlite_db
+persist_result_to_sqlite = split_db.persist_result_to_sqlite
+record_convergence_snapshot = split_db.record_convergence_snapshot
+sqlite_history_context = split_db.sqlite_history_context
+sqlite_record_count = split_db.sqlite_record_count
+sqlite_layout_trend_table = split_db.sqlite_layout_trend_table
+read_research_tail = split_db.read_research_tail
+append_research = split_db.append_research
+append_iteration_research = split_db.append_iteration_research
+append_result_research = split_db.append_result_research
+merge_priority_board = split_db.merge_priority_board
+
+configure_stage_args = split_policy.configure_stage_args
+build_search_tasks = split_policy.build_search_tasks
+apply_probe_reference_gate = split_policy.apply_probe_reference_gate
+probe_reference_runs_required = split_policy.probe_reference_runs_required
+search_execution_policy = split_policy.search_execution_policy
+single_scientist_policy_review = split_policy.single_scientist_policy_review
+executive_controller_decide = split_policy.executive_controller_decide
+physics_informed_select = split_policy.physics_informed_select
+check_systematic_infeasibility = split_policy.check_systematic_infeasibility
+
+default_initial_priority_plan = split_scientists.default_initial_priority_plan
+initial_priority_plan = split_scientists.initial_priority_plan
+scientist_a_pick = split_scientists.scientist_a_pick
+scientist_b_review = split_scientists.scientist_b_review
+scientist_c_arbitrate = split_scientists.scientist_c_arbitrate
 
 
 def main() -> int:
