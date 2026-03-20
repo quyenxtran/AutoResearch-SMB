@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import textwrap
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from . import run_stage as rs
 from .agent_results import (
